@@ -38,7 +38,7 @@ fatal("Invalid groupname '$opt_group'!")
 
 undef @q;
 db_query("SELECT id FROM user_groups WHERE name='$opt_group'",\@q);
-fatal("Group allready exists!") if ($q[0][0] > 0);
+fatal("Group already exists!") if ($q[0][0] > 0);
 
 unless ($opt_name) {
   print "Enter group description: ";
@@ -98,7 +98,7 @@ $res = update_history(-1, -1, 6,         # No UID. No SID. 6 = User group change
 if ($res) { fatal("Cannot update group history: $res"); }
 fatal("commit failed!") if (db_commit()<0);
 
-print "Group $opt_group added succesfully.\n";
+print "Group $opt_group added successfully.\n";
 exit;
 
 # eof :-)
