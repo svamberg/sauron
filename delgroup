@@ -72,7 +72,7 @@ if ($i) { # ask confirmation only in interactive session...
 fatal("Cannot delete group!".db_lasterrormsg())
     if (delete_user_group($id,$newid,$opt_group,$opt_newgroup,-1,-1) < 0);
 
-print "Group $opt_group deleted succesfully.\n";
+print "Group $opt_group deleted successfully.\n";
 exit(0);
 
 # eof

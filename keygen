@@ -286,7 +286,7 @@ sub addkey() {
     $name=getname($name);
     $comment=~s/^\s+|\s+$//g;
 
-    fatal("Key with same name allready exists: $name")
+    fatal("Key with same name already exists: $name")
 	if (get_key_by_name($server,$name) > 0);
 
     $type=gettype($type);

@@ -415,7 +415,7 @@ if (defined $commit) {
     if ($tmp1 < 0) {
 	fatal("Error $tmp1 updating hosts");
     }
-    print "\nHosts succesfully updated\n";
+    print "\nHosts successfully updated\n";
 } else {
     print "\nNo --commit - no changes were made to the database\n"
 }

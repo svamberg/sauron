@@ -41,7 +41,7 @@ if (@col && $col[0][0] eq 'gid') {
 	db_rollback();
 	fatal("Error $res while dropping column gid from users");
     }
-    print "Column gid succesfully dropped from table users\n";
+    print "Column gid successfully dropped from table users\n";
 } else {
     print "Column gid not found in table users (OK)\n";
 }
@@ -56,7 +56,7 @@ if (@col && $col[0][0] eq 'gid') {
 	db_rollback();
 	fatal("Error $res while dropping column gid from utmp");
     }
-    print "Column gid succesfully dropped from table utmp\n";
+    print "Column gid successfully dropped from table utmp\n";
 } else {
     print "Column gid not found in table utmp (OK)\n";
 }
@@ -71,7 +71,7 @@ if (@col && $col[0][0] eq 'host2') {
 	db_rollback();
 	fatal("Error $res while dropping column host2 from lastlog");
     }
-    print "Column host2 succesfully dropped from table lastlog\n";
+    print "Column host2 successfully dropped from table lastlog\n";
 } else {
     print "Column host2 not found in table lastlog (OK)\n";
 }

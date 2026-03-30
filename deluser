@@ -71,7 +71,7 @@ if ($i) { # ask confirmation only in interactive session...
 fatal("Cannot anonymized/delete user from users table!")
     if (delete_user($id, $opt_user, $opt_delete, $user{'expiration'}, time, getlogin()) < 0);
 
-print "User $opt_user " . ($opt_delete ? "deleted" : "anonymized") . " succesfully.\n";
+print "User $opt_user " . ($opt_delete ? "deleted" : "anonymized") . " successfully.\n";
 exit(0);
 
 # eof
