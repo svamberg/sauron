@@ -699,7 +699,7 @@ sub add_std_fields($) {
   return unless (ref($rec) eq 'HASH');
 
   $rec->{cdate_str}=($rec->{cdate} > 0 ?
-		     localtime($rec->{cdate}).' by '.$rec->{cuser} : 'UNKOWN');
+		     localtime($rec->{cdate}).' by '.$rec->{cuser} : 'UNKNOWN');
   $rec->{mdate_str}=($rec->{mdate} > 0 ?
 		     localtime($rec->{mdate}).' by '.$rec->{muser} : '');
 }
@@ -1955,7 +1955,7 @@ sub get_host($$) {
 		  "Algorithm,Type,Fingerprint,Comments",
 		  "type=1 AND ref=$id ORDER BY algorithm,hashtype,fingerprint",$rec,'sshfp_l');
   get_array_field("tlsa_entries",6,"id,usage,selector,matching_type,association_data,comment",
-		  "Usage,Selector,Matching Type,Asociation Data,Comments",
+		  "Usage,Selector,Matching Type,Association Data,Comments",
 		  "type=1 AND ref=$id ORDER BY usage,selector,matching_type,association_data",$rec,'tlsa_l');
   get_array_field("txt_entries",3,"id,txt,comment",
 		  "Text,Comments",
