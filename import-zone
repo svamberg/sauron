@@ -218,7 +218,7 @@ foreach $host (sort keys %zonedata) {
     }
   }
 
-  fatal("empty hostname adfter stripping origin: $host") unless ($host2);
+  fatal("empty hostname after stripping origin: $host") unless ($host2);
   print "host: $host ($host2) (type=$hosttype)\n" if ($opt_verbose);
 
   $mxlist = db_build_list_str($rec->{MX});
