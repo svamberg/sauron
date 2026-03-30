@@ -651,7 +651,8 @@ sub restricted_add_host($) {
   my($rec)=@_;
 
   if (check_perms('host',$rec->{domain},1)) {
-    alert1("Invalid hostname: does not conform to your restrictions");    return -101;
+    alert1("Invalid hostname: does not conform to your restrictions");
+    return -101;
   }
   if ($rec->{type} == 4 && check_perms('flags','CNAME',1)) {
     alert1("You don't have permission to add CNAME Aliases");
