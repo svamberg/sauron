@@ -106,6 +106,9 @@ my %approver_form = (
  ]
 );
 
+my $policy_delete_pending_count = 0;
+my $policy_delete_request_count = 0;
+
 
 sub menu_handler {
   my($state,$perms) = @_;
@@ -454,9 +457,30 @@ sub _edit_policy {
   }
 }
 
+sub _policy_delete_error_text {
+  my ($res) = @_;
+
+  if ($res == -11) {
+    return "Policy cannot be deleted: $policy_delete_pending_count pending request(s) still use this policy. Resolve or cancel active requests first.";
+  }
+
+  if ($res == -12) {
+    return "Policy cannot be deleted: $policy_delete_request_count request(s) still reference this policy.";
+  }
+
+  if ($res == -2) {
+    my $dbmsg = db_lasterrormsg();
+    return $dbmsg if (defined $dbmsg && $dbmsg ne '');
+  }
+
+  return '';
+}
+
 sub _delete_policy {
   my ($id) = @_;
-  my $res = delete_magic('ap','Policy','approvals',\%policy_form,\&get_policy,\&delete_policy,$id);
+  my $res = delete_magic('ap','Policy','approvals',\%policy_form,
+                         \&get_policy,\&delete_policy,$id,
+                         \&_policy_delete_error_text);
   if ($res > 0) {
     print p, a({-href=>"?menu=approvals"}, 'Back to policies');
   }
@@ -991,7 +1015,42 @@ sub update_policy {
 
 sub delete_policy {
   my ($id) = @_;
-  return db_exec("DELETE FROM approval_policies WHERE id = " . $id);
+  my $policy_id = int($id);
+  my (@q, $res);
+
+  $policy_delete_pending_count = 0;
+  $policy_delete_request_count = 0;
+
+  return -1 unless ($policy_id > 0);
+
+  $res = db_query("SELECT count(*) FROM dns_change_requests " .
+                  "WHERE policy_id = \$1 AND status = 'P'", \@q,
+                  $policy_id);
+  if ($res < 0) {
+    write2log("delete_policy($policy_id): failed to count pending requests: " .
+              db_lasterrormsg());
+    return -2;
+  }
+
+  if (@q > 0) {
+    $policy_delete_pending_count = int($q[0][0]);
+    return -11 if ($policy_delete_pending_count > 0);
+  }
+
+  $res = db_query("SELECT count(*) FROM dns_change_requests " .
+                  "WHERE policy_id = \$1", \@q, $policy_id);
+  if ($res < 0) {
+    write2log("delete_policy($policy_id): failed to count referencing requests: " .
+              db_lasterrormsg());
+    return -2;
+  }
+
+  if (@q > 0) {
+    $policy_delete_request_count = int($q[0][0]);
+    return -12 if ($policy_delete_request_count > 0);
+  }
+
+  return db_exec("DELETE FROM approval_policies WHERE id = " . $policy_id);
 }
 
 sub get_rule {
