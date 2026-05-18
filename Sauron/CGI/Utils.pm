@@ -458,8 +458,8 @@ sub add_magic($$$$$$) {
   return 0;
 }
 
-sub delete_magic($$$$$$$) {
-  my($prefix,$name,$menu,$form,$get_func,$del_func,$id) = @_;
+sub delete_magic($$$$$$$;$) {
+  my($prefix,$name,$menu,$form,$get_func,$del_func,$id,$error_func) = @_;
   my(%h,$res);
   my $selfurl = script_name() . path_info();
 
@@ -481,8 +481,16 @@ sub delete_magic($$$$$$$) {
 
     $res=&$del_func($id);
     if ($res < 0) {
+      my $err_detail = '';
+      if ($error_func) {
+        my $msg = &$error_func($res);
+        if (defined $msg && $msg ne '') {
+          $err_detail = "<br>" . encode_entities($msg);
+        }
+      }
+
       print "<FONT color=\"red\">",h1("$name record delete failed!"),
-      "<br>result code=$res</FONT>";
+      "<br>result code=$res$err_detail</FONT>";
       return -10;
     } else {
       print h2("$name record successfully deleted");
