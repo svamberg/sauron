@@ -218,11 +218,6 @@ my %server_form = (
   {ftype=>4, name=>'Record created', tag=>'cdate_str', no_edit=>1},
   {ftype=>4, name=>'Last modified', tag=>'mdate_str', no_edit=>1}
  ]
-# bgcolor=>'#eeeebf',
-# border=>'0',
-# width=>'100%',
-# nwidth=>'30%',
-# heading_bg=>'#aaaaff'
 );
 
 my %master_servers;
@@ -265,9 +260,10 @@ sub select_server($$)
     start_form(-method=>'POST',-action=>$selfurl),
     hidden('menu','servers'),p,
     "Available servers:",p,
-    scrolling_list(-width=>'100%',-name=>'server_list',-size=>'10',-values=>\@l,-labels=>\%srec),
-    br,
+    '<div class="s-server-select">',
+    scrolling_list(-name=>'server_list',-size=>'10',-values=>\@l,-labels=>\%srec),
     submit(-name=>'server_select_submit',-value=>'Select server'),
+    '</div>',
     end_form;
 
   return 0;
@@ -281,7 +277,7 @@ sub display_new_server($$$$)
 
   #display selected server info
   unless ($serverid > 0) {
-    print h3("Cannot select server!"),p;
+    alert1('Cannot select server.');
     select_server($state,$perms);
     return 1;
   }
@@ -352,9 +348,9 @@ sub menu_handler {
 
     if (param('srvdel_submit') ne '') {
       if (delete_server($serverid) < 0) {
-	print h2("Cannot delete server!");
+	alert1("Cannot delete server.");
       } else {
-	print h2('Server deleted successfully!');
+	success1('Server deleted successfully.');
 	$state->{'zone'}=''; $state->{'zoneid'}=-1;
 	$state->{'server'}=''; $state->{'serverid'}=-1;
 	save_state($scookie,$state);
