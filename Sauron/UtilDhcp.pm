@@ -8,6 +8,7 @@ package Sauron::UtilDhcp;
 require Exporter;
 use IO::File;
 use JSON::PP;
+use Net::IP qw(:PROC);
 use Sauron::Util;
 use strict;
 use vars qw($VERSION @ISA @EXPORT);
@@ -16,7 +17,8 @@ use open ':locale';
 $VERSION = '$Id:$ ';
 
 @ISA = qw(Exporter); # Inherit from Exporter
-@EXPORT = qw(process_dhcpdconf process_kea_dhcpconf is_kea_dhcpconf);
+@EXPORT = qw(process_dhcpdconf process_kea_dhcpconf is_kea_dhcpconf
+             build_kea_from_isc_data);
 
 
 my $debug = 0;
@@ -257,6 +259,685 @@ sub _append_kea_class($$) {
   _append_option_data_lines(\@class_data,$$class{'option-data'});
 
   $$data{class}->{$name} = \@class_data;
+}
+
+sub _netmask_to_bits($) {
+  my ($mask) = @_;
+  my ($bits,$bin);
+
+  return undef unless (defined $mask);
+  return undef unless ($mask =~ /^\s*(\d{1,3}(?:\.\d{1,3}){3})\s*$/);
+
+  $mask = $1;
+  return undef if ($mask =~ /(^\.|\.$|\.\.|[^\d\.])/);
+
+  $bits = 0;
+  $bin = '';
+  foreach my $octet (split(/\./,$mask)) {
+    return undef if ($octet < 0 || $octet > 255);
+    $bin .= sprintf('%08b',$octet);
+  }
+
+  return undef unless ($bin =~ /^1*0*$/);
+  ($bits) = ($bin =~ /^(1*)/);
+  return length($bits);
+}
+
+sub _subnet_key_to_kea_cidr($$) {
+  my ($key,$v6) = @_;
+  my ($ip,$mask,$bits);
+
+  return undef unless (defined $key && $key ne '');
+
+  if ($v6) {
+    return $key if (cidr6ok($key));
+    return undef;
+  }
+
+  return undef
+    unless ($key =~ /^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+netmask\s+(\d{1,3}(?:\.\d{1,3}){3})\s*$/i);
+
+  ($ip,$mask) = ($1,$2);
+  $bits = _netmask_to_bits($mask);
+  return undef unless (defined $bits);
+
+  return "$ip/$bits";
+}
+
+sub _cidr_prefixlen($) {
+  my ($cidr) = @_;
+
+  return 0 unless (defined $cidr);
+  return $1 if ($cidr =~ /\/(\d{1,3})\s*$/);
+  return 0;
+}
+
+sub _line_to_kea_option_data($) {
+  my ($line) = @_;
+  my ($name,$data,$space,%opt);
+
+  return undef unless (defined $line);
+  return undef unless ($line =~ /^\s*option\s+([A-Za-z0-9_\.-]+)\s*(.*?)\s*;\s*$/);
+
+  ($name,$data) = ($1,$2);
+  $space = '';
+
+  if ($name =~ /^([^.]+)\.(.+)$/) {
+    ($space,$name) = ($1,$2);
+  }
+
+  %opt = (name => $name);
+  $opt{space} = $space if ($space ne '');
+  $opt{data} = $data if (defined $data && $data ne '');
+
+  return \%opt;
+}
+
+sub _pool_range_from_lines($$) {
+  my ($lines,$v6) = @_;
+  my ($start,$end);
+
+  return () unless (defined $lines && ref($lines) eq 'ARRAY');
+
+  foreach my $line (@$lines) {
+    next unless (defined $line);
+
+    if (!$v6 && $line =~ /^\s*range\s+(\S+)(?:\s+(\S+))?\s*;\s*$/) {
+      ($start,$end) = ($1,($2 ? $2 : $1));
+      last;
+    }
+
+    if ($v6 && $line =~ /^\s*range6\s+(\S+)(?:\s+(\S+))?\s*;\s*$/) {
+      ($start,$end) = ($1,($2 ? $2 : $1));
+      last;
+    }
+  }
+
+  return () unless ($start && $end);
+  return ($start,$end);
+}
+
+sub _ip_in_cidr($$) {
+  my ($ip,$cidr) = @_;
+  my ($net,$addr,$overlap);
+
+  return 0 unless ($ip && $cidr);
+
+  $net = new Net::IP($cidr);
+  $addr = new Net::IP($ip);
+  return 0 unless ($net && $addr);
+
+  $overlap = $net->overlaps($addr);
+  return ($overlap == $IP_B_IN_A_OVERLAP || $overlap == $IP_IDENTICAL) ? 1 : 0;
+}
+
+sub _pool_in_cidr($$$) {
+  my ($start,$end,$cidr) = @_;
+
+  return 0 unless ($start && $end && $cidr);
+  return (_ip_in_cidr($start,$cidr) && _ip_in_cidr($end,$cidr)) ? 1 : 0;
+}
+
+sub _strip_isc_directive_value($) {
+  my ($val) = @_;
+
+  return '' unless (defined $val);
+  $val =~ s/^\s+|\s+$//g;
+  $val =~ s/^"(.*)"$/$1/;
+  return $val;
+}
+
+sub _dedupe_option_data($) {
+  my ($opts) = @_;
+  my (%seen,@out,$i,$opt,$key,$space,$name);
+
+  return [] unless (defined $opts && ref($opts) eq 'ARRAY');
+
+  for ($i=$#$opts;$i>=0;$i--) {
+    $opt = $$opts[$i];
+    next unless (defined $opt && ref($opt) eq 'HASH' && defined $$opt{name});
+
+    $space = (defined $$opt{space} && $$opt{space} ne '' ? $$opt{space} . '.' : '');
+    $name = $$opt{name};
+    $key = lc($space . $name);
+
+    next if ($seen{$key}++);
+    unshift @out,$opt;
+  }
+
+  return \@out;
+}
+
+sub _append_user_context_lines($$) {
+  my ($obj,$lines) = @_;
+  my ($ctx,$lst);
+
+  return unless (defined $obj && ref($obj) eq 'HASH');
+  return unless (defined $lines && ref($lines) eq 'ARRAY' && @$lines > 0);
+
+  $ctx = $$obj{'user-context'};
+  unless (defined $ctx && ref($ctx) eq 'HASH') {
+    $ctx = {};
+    $$obj{'user-context'} = $ctx;
+  }
+
+  $lst = $$ctx{'sauron-isc-extra'};
+  unless (defined $lst && ref($lst) eq 'ARRAY') {
+    $lst = [];
+    $$ctx{'sauron-isc-extra'} = $lst;
+  }
+
+  push @$lst, @$lines;
+}
+
+sub _ensure_user_context_hash($) {
+  my ($obj) = @_;
+  my ($ctx);
+
+  return {} unless (defined $obj && ref($obj) eq 'HASH');
+
+  $ctx = $$obj{'user-context'};
+  unless (defined $ctx && ref($ctx) eq 'HASH') {
+    $ctx = {};
+    $$obj{'user-context'} = $ctx;
+  }
+
+  return $ctx;
+}
+
+sub _apply_isc_directive_to_object($$$$) {
+  my ($obj,$line,$v6,$scope) = @_;
+  my ($tmp,$key,$value);
+
+  return 0 unless (defined $obj && ref($obj) eq 'HASH' && defined $line && defined $scope);
+
+  if (!$v6) {
+    if ($scope eq 'global') {
+      if ($line =~ /^\s*authoritative\s*;\s*$/i) {
+        $$obj{authoritative} = JSON::PP::true;
+        return 1;
+      }
+      if ($line =~ /^\s*not\s+authoritative\s*;\s*$/i) {
+        $$obj{authoritative} = JSON::PP::false;
+        return 1;
+      }
+
+      if ($line =~ /^\s*default-lease-time\s+(\d+)\s*;\s*$/i) {
+        $$obj{'valid-lifetime'} = int($1);
+        return 1;
+      }
+      if ($line =~ /^\s*min-lease-time\s+(\d+)\s*;\s*$/i) {
+        $$obj{'min-valid-lifetime'} = int($1);
+        return 1;
+      }
+      if ($line =~ /^\s*max-lease-time\s+(\d+)\s*;\s*$/i) {
+        $$obj{'max-valid-lifetime'} = int($1);
+        return 1;
+      }
+
+      if ($line =~ /^\s*ddns-update-style\s+none\s*;\s*$/i) {
+        $$obj{'ddns-send-updates'} = JSON::PP::false;
+        return 1;
+      }
+      if ($line =~ /^\s*ddns-update-style\s+\S+\s*;\s*$/i) {
+        $$obj{'ddns-send-updates'} = JSON::PP::true;
+        return 1;
+      }
+    }
+
+    if ($scope =~ /^(global|subnet|host)$/) {
+      if ($line =~ /^\s*next-server\s+(.+?)\s*;\s*$/i) {
+        $tmp = _strip_isc_directive_value($1);
+        $$obj{'next-server'} = $tmp if ($tmp ne '');
+        return 1;
+      }
+      if ($line =~ /^\s*filename\s+(.+?)\s*;\s*$/i) {
+        $tmp = _strip_isc_directive_value($1);
+        $$obj{'boot-file-name'} = $tmp if ($tmp ne '');
+        return 1;
+      }
+      if ($line =~ /^\s*server-name\s+(.+?)\s*;\s*$/i) {
+        $tmp = _strip_isc_directive_value($1);
+        $$obj{'server-hostname'} = $tmp if ($tmp ne '');
+        return 1;
+      }
+    }
+  }
+
+  if ($scope =~ /^(global|subnet)$/) {
+    if ($line =~ /^\s*(preferred-lifetime|valid-lifetime|renew-timer|rebind-timer|min-preferred-lifetime|max-preferred-lifetime|min-valid-lifetime|max-valid-lifetime)\s+(\d+)\s*;\s*$/i) {
+      $key = lc($1);
+      $value = int($2);
+      $$obj{$key} = $value;
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+sub _extract_host_groups($) {
+  my ($host_lines) = @_;
+  my (@groups,%seen,$line,$group);
+
+  return [] unless (defined $host_lines && ref($host_lines) eq 'ARRAY');
+
+  foreach $line (@$host_lines) {
+    next unless (defined $line);
+    next unless ($line =~ /^\s*GROUP\s+(\S+)\s*$/);
+    $group = $1;
+    next if ($seen{$group}++);
+    push @groups, $group;
+  }
+
+  return \@groups;
+}
+
+sub _host_lines_with_group_inheritance($$) {
+  my ($data,$host_lines) = @_;
+  my (@merged,$line,$group,$groups);
+
+  return [] unless (defined $host_lines && ref($host_lines) eq 'ARRAY');
+
+  $groups = _extract_host_groups($host_lines);
+  foreach $group (@$groups) {
+    next unless (defined $$data{group} && ref($$data{group}) eq 'HASH');
+    next unless (defined $$data{group}->{$group} && ref($$data{group}->{$group}) eq 'ARRAY');
+    push @merged, @{$$data{group}->{$group}};
+  }
+
+  foreach $line (@$host_lines) {
+    next unless (defined $line);
+    next if ($line =~ /^\s*GROUP\s+/);
+    push @merged, $line;
+  }
+
+  return \@merged;
+}
+
+sub _reservation_hostname_with_suffix($$$$) {
+  my ($hostname,$index,$count,$ip) = @_;
+  my ($suffix);
+
+  return $hostname if ($count < 2 && $index == 0);
+
+  $suffix = (defined $ip ? $ip : ($index + 1));
+  $suffix =~ s/[^0-9A-Za-z]+/-/g;
+  $suffix =~ s/^-+|-+$//g;
+  $suffix = ($suffix ne '' ? $suffix : ($index + 1));
+
+  return $hostname . '-' . $suffix;
+}
+
+sub _split_isc_fixed_address_list($$) {
+  my ($raw,$v6) = @_;
+  my (@parts,@ips,$part,$ip);
+
+  return [] unless (defined $raw);
+
+  @parts = split(/\s*,\s*/,$raw);
+  @parts = split(/\s+/,$raw) if (@parts < 2 && $raw =~ /\s+/);
+
+  foreach $part (@parts) {
+    next unless (defined $part);
+    $part =~ s/^\s+|\s+$//g;
+    next unless ($part ne '');
+
+    if (!$v6 && is_ip($part) && $part !~ /:/) {
+      push @ips, $part;
+      next;
+    }
+    if ($v6 && is_ip($part) && $part =~ /:/) {
+      push @ips, $part;
+      next;
+    }
+  }
+
+  return \@ips;
+}
+
+sub _host_to_kea_reservations($$$$) {
+  my ($hostname,$lines,$v6,$base_obj) = @_;
+  my ($id,@ips,@opts,@extra,$line,$opt,$tmpips,$res,
+      @reservations,$deduped_opts,$i,%template);
+
+  return [] unless (defined $hostname && defined $lines && ref($lines) eq 'ARRAY');
+
+  %template = (%{$base_obj || {}});
+
+  foreach $line (@$lines) {
+    next unless (defined $line);
+
+    if (!$v6 && $line =~ /^\s*fixed-address\s+(\S.*)\s*;\s*$/) {
+      $tmpips = _split_isc_fixed_address_list($1,$v6);
+      push @ips, @$tmpips if (defined $tmpips && ref($tmpips) eq 'ARRAY');
+      next;
+    }
+    if ($v6 && $line =~ /^\s*fixed-address6\s+(\S.*)\s*;\s*$/) {
+      $tmpips = _split_isc_fixed_address_list($1,$v6);
+      push @ips, @$tmpips if (defined $tmpips && ref($tmpips) eq 'ARRAY');
+      next;
+    }
+
+    if (!$v6 && $line =~ /^\s*hardware\s+ethernet\s+(\S+)\s*;\s*$/i) {
+      $id = lc($1);
+      next;
+    }
+
+    if ($v6 && $line =~ /^\s*host-identifier\s+option\s+dhcp6\.client-id\s+(\S+)\s*;\s*$/i) {
+      $id = lc($1);
+      $id =~ s/://g;
+      next;
+    }
+
+    $opt = _line_to_kea_option_data($line);
+    if ($opt) {
+      push @opts,$opt;
+      next;
+    }
+
+    if (_apply_isc_directive_to_object(\%template,$line,$v6,'host')) {
+      next;
+    }
+
+    push @extra,$line;
+  }
+
+  return [] unless (@ips > 0 && $id);
+
+  $deduped_opts = _dedupe_option_data(\@opts);
+
+  for $i (0..$#ips) {
+    my %item = (%template);
+
+    $item{hostname} = _reservation_hostname_with_suffix($hostname,$i,scalar(@ips),$ips[$i]);
+
+    if (!$v6) {
+      $item{'hw-address'} = $id;
+      $item{'ip-address'} = $ips[$i];
+    }
+    else {
+      $item{duid} = $id;
+      $item{'ip-addresses'} = [$ips[$i]];
+    }
+
+    $item{'option-data'} = [@$deduped_opts] if (@$deduped_opts > 0);
+    _append_user_context_lines(\%item,\@extra);
+
+    push @reservations, \%item;
+  }
+
+  return \@reservations;
+}
+
+sub _extract_vlan_marker($) {
+  my ($line) = @_;
+  my ($name);
+
+  return undef unless (defined $line);
+  return undef unless ($line =~ /^\s*VLAN\s+(\".*\"|\S+)\s*$/);
+
+  $name = $1;
+  $name =~ s/^\"//;
+  $name =~ s/\"$//;
+
+  return $name;
+}
+
+sub _make_kea_subnet_item($$$) {
+  my ($key,$lines,$v6) = @_;
+  my ($cidr,$vlan,@opts,%item,$opt,$tmp_vlan,@extra,$deduped_opts);
+
+  return undef unless (defined $lines && ref($lines) eq 'ARRAY');
+
+  $cidr = _subnet_key_to_kea_cidr($key,$v6);
+  return undef unless ($cidr);
+
+  foreach my $line (@$lines) {
+    $tmp_vlan = _extract_vlan_marker($line);
+    if (defined $tmp_vlan && $tmp_vlan ne '') {
+      $vlan = $tmp_vlan;
+      next;
+    }
+
+    $opt = _line_to_kea_option_data($line);
+    if ($opt) {
+      push @opts,$opt;
+      next;
+    }
+
+    if (_apply_isc_directive_to_object(\%item,$line,$v6,'subnet')) {
+      next;
+    }
+
+    push @extra,$line;
+  }
+
+  %item = (
+    _cidr       => $cidr,
+    _vlan       => $vlan,
+    subnet      => $cidr,
+    %item,
+  );
+  $deduped_opts = _dedupe_option_data(\@opts);
+  $item{'option-data'} = $deduped_opts if (@$deduped_opts > 0);
+  _append_user_context_lines(\%item,\@extra);
+
+  return \%item;
+}
+
+sub build_kea_from_isc_data($$) {
+  my ($data,$v6) = @_;
+  my ($subnet_key,$pool_key,$kea_subnet_key,$global_ref,
+      @global_opts,@global_extra,@subnets,@ordered_subnets,
+      @classes,@shared_names,%shared_map,%shared_opts,%shared_extra,
+      %section,$line,$opt,$class,$class_ref,$test,
+      $pool_ref,$pool_name,$start,$end,@pool_opts,@pool_extra,$pool_obj,
+      @subnet_matches,$subnet_obj,$host_ref,$host_name,$host_lines,
+      $res_lst,$res_obj,$res_ip,@res_matches,$shared_name,$shared_obj,
+      @shared_list,@top_subnets,%seen_shared,@class_opts,@class_extra,
+      $ctx,$deduped_opts,@unmapped_reservations,
+      $shared_opts_ref,$shared_extra_ref);
+
+  _init_data_refs($data);
+
+  $subnet_key = (!$v6 ? 'subnet' : 'subnet6');
+  $pool_key = (!$v6 ? 'pool' : 'pool6');
+  $kea_subnet_key = (!$v6 ? 'subnet4' : 'subnet6');
+
+  # Global options and known ISC directives.
+  $global_ref = _arrayref($$data{GLOBAL});
+  foreach $line (@$global_ref) {
+    $opt = _line_to_kea_option_data($line);
+    if ($opt) {
+      push @global_opts,$opt;
+      next;
+    }
+
+    if (_apply_isc_directive_to_object(\%section,$line,$v6,'global')) {
+      next;
+    }
+
+    push @global_extra,$line;
+  }
+  $deduped_opts = _dedupe_option_data(\@global_opts);
+  $section{'option-data'} = $deduped_opts if (@$deduped_opts > 0);
+  _append_user_context_lines(\%section,\@global_extra);
+
+  # Shared-network level options.
+  foreach $shared_name (sort keys %{$$data{'shared-network'}}) {
+    my (@opts,@extra);
+    foreach $line (@{_arrayref($$data{'shared-network'}->{$shared_name})}) {
+      $opt = _line_to_kea_option_data($line);
+      if ($opt) {
+        push @opts,$opt;
+        next;
+      }
+
+      # Keep unknown/non-option shared-network directives for compatibility.
+      push @extra,$line;
+    }
+
+    $shared_opts{$shared_name} = _dedupe_option_data(\@opts) if (@opts > 0);
+    $shared_extra{$shared_name} = [@extra] if (@extra > 0);
+  }
+
+  # Build subnet records.
+  foreach my $key (sort keys %{$$data{$subnet_key}}) {
+    my $item = _make_kea_subnet_item($key,$$data{$subnet_key}->{$key},$v6);
+    push @subnets,$item if ($item);
+  }
+
+  # Prefer most-specific subnet when attaching pools and reservations.
+  @ordered_subnets = sort {
+    _cidr_prefixlen($$b{subnet}) <=> _cidr_prefixlen($$a{subnet})
+  } @subnets;
+
+  # Attach pools.
+  foreach $pool_name (sort keys %{$$data{$pool_key}}) {
+    $pool_ref = _arrayref($$data{$pool_key}->{$pool_name});
+    ($start,$end) = _pool_range_from_lines($pool_ref,$v6);
+    next unless ($start && $end);
+
+    @pool_opts = ();
+    @pool_extra = ();
+    foreach $line (@$pool_ref) {
+      next if ((!$v6 && $line =~ /^\s*range\s+/) || ($v6 && $line =~ /^\s*range6\s+/));
+
+      $opt = _line_to_kea_option_data($line);
+      if ($opt) {
+        push @pool_opts,$opt;
+        next;
+      }
+
+      push @pool_extra,$line;
+    }
+
+    $pool_obj = {
+      pool => ($start eq $end ? $start : "$start - $end")
+    };
+    $deduped_opts = _dedupe_option_data(\@pool_opts);
+    $$pool_obj{'option-data'} = $deduped_opts if (@$deduped_opts > 0);
+    _append_user_context_lines($pool_obj,\@pool_extra);
+
+    @subnet_matches = grep { _pool_in_cidr($start,$end,$$_{subnet}) } @ordered_subnets;
+    next unless (@subnet_matches > 0);
+
+    $subnet_obj = $subnet_matches[0];
+    $$subnet_obj{pools} = [] unless (ref($$subnet_obj{pools}) eq 'ARRAY');
+    push @{$$subnet_obj{pools}}, $pool_obj;
+  }
+
+  # Attach reservations with group inheritance and multi-IP split.
+  foreach $host_name (sort keys %{$$data{host}}) {
+    $host_ref = _arrayref($$data{host}->{$host_name});
+    $host_lines = _host_lines_with_group_inheritance($data,$host_ref);
+    $res_lst = _host_to_kea_reservations($host_name,$host_lines,$v6,{});
+
+    foreach $res_obj (@$res_lst) {
+      $res_ip = (!$v6 ? $$res_obj{'ip-address'} : $$res_obj{'ip-addresses'}->[0]);
+      next unless ($res_ip);
+
+      @res_matches = grep { _ip_in_cidr($res_ip,$$_{subnet}) } @ordered_subnets;
+      unless (@res_matches > 0) {
+        push @unmapped_reservations, $res_obj;
+        next;
+      }
+
+      $subnet_obj = $res_matches[0];
+      $$subnet_obj{reservations} = [] unless (ref($$subnet_obj{reservations}) eq 'ARRAY');
+      push @{$$subnet_obj{reservations}}, $res_obj;
+    }
+  }
+
+  # Client classes (best-effort conversion).
+  foreach $class (sort keys %{$$data{class}}) {
+    my %class_obj = (name => $class);
+    @class_opts = ();
+    @class_extra = ();
+    $test = undef;
+    $class_ref = _arrayref($$data{class}->{$class});
+
+    foreach $line (@$class_ref) {
+      if ($line =~ /^\s*match\s+if\s+(.+?)\s*;\s*$/i) {
+        $test = $1;
+        next;
+      }
+
+      $opt = _line_to_kea_option_data($line);
+      if ($opt) {
+        push @class_opts,$opt;
+        next;
+      }
+
+      push @class_extra,$line;
+    }
+
+    $class_obj{test} = $test if (defined $test && $test ne '');
+    $deduped_opts = _dedupe_option_data(\@class_opts);
+    $class_obj{'option-data'} = $deduped_opts if (@$deduped_opts > 0);
+    _append_user_context_lines(\%class_obj,\@class_extra);
+    push @classes, \%class_obj;
+  }
+  $section{'client-classes'} = \@classes if (@classes > 0);
+
+  # Group subnets by shared-network marker.
+  foreach $subnet_obj (@subnets) {
+    $shared_name = $$subnet_obj{_vlan};
+    if (defined $shared_name && $shared_name ne '') {
+      unless ($seen_shared{$shared_name}) {
+        push @shared_names, $shared_name;
+        $seen_shared{$shared_name} = 1;
+      }
+      $shared_map{$shared_name} = [] unless (ref($shared_map{$shared_name}) eq 'ARRAY');
+      push @{$shared_map{$shared_name}}, $subnet_obj;
+    }
+    else {
+      push @top_subnets, $subnet_obj;
+    }
+  }
+
+  foreach $shared_name (@shared_names) {
+    $shared_obj = {
+      name => $shared_name,
+      $kea_subnet_key => []
+    };
+
+    $shared_opts_ref = $shared_opts{$shared_name};
+    $$shared_obj{'option-data'} = $shared_opts_ref
+      if (ref($shared_opts_ref) eq 'ARRAY' && @$shared_opts_ref > 0);
+
+    $shared_extra_ref = $shared_extra{$shared_name};
+    _append_user_context_lines($shared_obj,$shared_extra_ref)
+      if (ref($shared_extra_ref) eq 'ARRAY' && @$shared_extra_ref > 0);
+
+    foreach $subnet_obj (@{$shared_map{$shared_name}}) {
+      my %clean = %{$subnet_obj};
+      delete $clean{_cidr};
+      delete $clean{_vlan};
+      push @{$$shared_obj{$kea_subnet_key}}, \%clean;
+    }
+    push @shared_list, $shared_obj;
+  }
+  $section{'shared-networks'} = \@shared_list if (@shared_list > 0);
+
+  if (@top_subnets > 0) {
+    my @clean_subnets;
+    foreach $subnet_obj (@top_subnets) {
+      my %clean = %{$subnet_obj};
+      delete $clean{_cidr};
+      delete $clean{_vlan};
+      push @clean_subnets, \%clean;
+    }
+    $section{$kea_subnet_key} = \@clean_subnets;
+  }
+
+  if (@unmapped_reservations > 0) {
+    $ctx = _ensure_user_context_hash(\%section);
+    $$ctx{'sauron-unmapped-reservations'} = \@unmapped_reservations;
+  }
+
+  return \%section;
 }
 
 

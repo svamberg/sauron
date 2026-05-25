@@ -184,8 +184,8 @@ COMMANDS
    Utility for running SQL code from file into Sauron database.
 
  sauron
-   Program to for generating named/dhcpd configuration files from Sauron 
-   database for given server.
+   Program to for generating named/dhcpd configuration files and KEA DHCP
+   JSON output from Sauron database for given server.
 
  status
    Utility for listing database connection and www-interface status.

@@ -17,7 +17,9 @@ use Sauron::DB;
 use Sauron::BackEnd;
 use Sauron::Sauron;
 use Sauron::SetupIO;
+use Sauron::UtilDhcp;
 use Sauron::UtilZone;
+use JSON::PP;
 use Net::IP qw(:PROC);
 use open ':locale';
 
@@ -27,6 +29,7 @@ load_config();
 $bind_conf=0;
 $dhcp_conf=0;
 $dhcp6_conf=0;
+$kea_conf=0;
 $printer_conf=0;
 
 %yes_no_enum = (D=>'',Y=>'yes',N=>'no');
@@ -3067,6 +3070,99 @@ sub make_dhcp6() {
 }
 
 
+sub dhcp_net_family_count($) {
+  my ($family) = @_;
+  my (@q,$sid);
+
+  $sid = ($server{masterserver} > 0 ? $server{masterserver} : $serverid);
+
+  db_query("SELECT count(id) FROM nets WHERE server=$sid AND no_dhcp=false " .
+           "AND subnet=false AND dummy=false AND family(net) = $family",\@q);
+  error(db_errormsg()) if (db_errormsg());
+
+  return (($q[0][0] && $q[0][0] > 0) ? $q[0][0] : 0);
+}
+
+
+sub make_kea_dhcp() {
+  my (%data,%kea,$json,$sec,$need_v4,$need_v6,$generated_v4,$generated_v6,
+      $keep_v4,$keep_v6,$dhcpc_v4,$dhcpc_v6,@tmpfiles,$kea_filename);
+
+  print "KEA DHCP configuration\n";
+
+  # --kea defaults to exporting both DHCP families unless one is explicitly selected.
+  $need_v4 = ($opt_dhcp || $opt_all || (!$opt_dhcp && !$opt_dhcp6) ? 1 : 0);
+  $need_v6 = ($opt_dhcp6 || $opt_all || (!$opt_dhcp && !$opt_dhcp6) ? 1 : 0);
+
+  $keep_v4 = ($dhcp_conf ? 1 : 0);
+  $keep_v6 = ($dhcp6_conf ? 1 : 0);
+
+  if ($need_v4) {
+    $dhcpc_v4 = dhcp_net_family_count(4);
+    if ($dhcpc_v4 > 0) {
+      if (!$keep_v4 || !-r 'dhcpd.conf') {
+        make_dhcp();
+        $generated_v4 = 1;
+      }
+
+      undef %data;
+      process_dhcpdconf('dhcpd.conf',\%data,0);
+      $sec = build_kea_from_isc_data(\%data,0);
+      $kea{Dhcp4} = $sec if ($sec && ref($sec) eq 'HASH' && keys(%{$sec}) > 0);
+      push @tmpfiles, 'dhcpd.conf' if ($generated_v4 && !$keep_v4);
+    }
+    elsif ($opt_verbose) {
+      print "Skipping DHCP4 section in KEA export (no DHCPv4 nets).\n";
+    }
+  }
+
+  if ($need_v6) {
+    $dhcpc_v6 = dhcp_net_family_count(6);
+    if ($dhcpc_v6 > 0) {
+      if (!$keep_v6 || !-r 'dhcpd6.conf') {
+        make_dhcp6();
+        $generated_v6 = 1;
+      }
+
+      undef %data;
+      process_dhcpdconf('dhcpd6.conf',\%data,1);
+      $sec = build_kea_from_isc_data(\%data,1);
+      $kea{Dhcp6} = $sec if ($sec && ref($sec) eq 'HASH' && keys(%{$sec}) > 0);
+      push @tmpfiles, 'dhcpd6.conf' if ($generated_v6 && !$keep_v6);
+    }
+    elsif ($opt_verbose) {
+      print "Skipping DHCP6 section in KEA export (no DHCPv6 nets).\n";
+    }
+  }
+
+  fatal("No DHCP data available for KEA export") unless (keys(%kea) > 0);
+
+  $kea_filename = 'kea-dhcp.json';
+  print "Generating $kea_filename...\n";
+
+  open(KEAFILE,">$kea_filename$tmp_extension")
+    || fatal("Cannot create $kea_filename$tmp_extension!");
+  $open_tmpfiles{$kea_filename . $tmp_extension} = $kea_filename;
+
+  $json = JSON::PP->new()->ascii()->pretty()->canonical(1);
+  print KEAFILE $json->encode(\%kea);
+  close(KEAFILE);
+
+  # remove $tmp_extension from generated file name
+  foreach $tmpfile (keys %open_tmpfiles) {
+    print "rename: $tmpfile --> $open_tmpfiles{$tmpfile}\n" if ($opt_verbose);
+    fatal("failed to rename tmpfile: $tmpfile")
+      unless(rename($tmpfile,$open_tmpfiles{$tmpfile})==1);
+    delete $open_tmpfiles{$tmpfile};
+  }
+
+  foreach $tmpfile (@tmpfiles) {
+    next unless (-f $tmpfile);
+    unlink($tmpfile) || error("failed to remove temporary ISC file: $tmpfile");
+  }
+}
+
+
 
 sub print_subnets() {
   my(@qq,@qqq,$j,$k,$l,$router,$ssnet,$snet,$nmask,$dhcpid,$pri);
@@ -3519,7 +3615,7 @@ sub make_printcap() {
 
 $VER = sauron_version();
 
-$result=GetOptions("help|h","all|a","bind|b","dhcp|d","dhcp6","printer|p","mail",
+$result=GetOptions("help|h","all|a","bind|b","dhcp|d","dhcp6","kea","printer|p","mail",
                    "updateserial","noupdateserial","keep-pending","verbose","clean",
                    "check","dhcpclass=s","tinydns|t", "ignorelocal|i");
 
@@ -3531,6 +3627,7 @@ if ($opt_help || @ARGV < 1 || $result < 1) {
       "\t--tinydns            generate DJBDNS (tinydns) configuration files\n",
       "\t--dhcp               generate DHCP (dhcpd) configuration files\n",
       "\t--dhcp6              generate DHCPv6 (dhcpd) configuration files\n",
+      "\t--kea                generate KEA DHCP JSON configuration file\n",
       "\t--clean              cleanup expired records and vacuum database\n",
       "\t--printer            generate PRINTER (lpd) configuration files\n\n",
       "\t--updateserial       force serial update on master zones\n",
@@ -3549,6 +3646,7 @@ $opt_verbose=($opt_verbose ? 1 : 0);
 $opt_clean=($opt_clean ? 1 : 0);
 $opt_dhcp=($opt_dhcp ? 1 : 0);
 $opt_dhcp6=($opt_dhcp6 ? 1 : 0);
+$opt_kea=($opt_kea ? 1 : 0);
 $opt_bind=($opt_bind ? 1 : 0);
 $opt_tinydns=($opt_tinydns ? 1 : 0);
 $opt_printer=($opt_printer ? 1 : 0);
@@ -3559,6 +3657,7 @@ $opt_check=($opt_check ? 1 : 0);
 $opt_ignorelocal = ($opt_ignorelocal ? 1 : 0);
 $dhcp6_conf=1 if ($opt_dhcp6 || $opt_all);
 $dhcp_conf=1 if ($opt_dhcp || $opt_all);
+$kea_conf=1 if ($opt_kea);
 $bind_conf=1 if ($opt_bind || $opt_all);
 $tiny_conf=1 if ($opt_tinydns || $opt_all);
 $printer_conf=1 if ($opt_printer || $opt_all);
@@ -3597,6 +3696,8 @@ fatal("cannot find/execute SAURON_DHCP6_CHK_PROG: $SAURON_DHCP6_CHK_PROG")
   if ($opt_check && $dhcp6_conf && ! -x $SAURON_DHCP6_CHK_PROG);
 fatal("--dhcpclass can only be used with --dhcp option")
   if ($opt_dhcpclass && not $opt_dhcp);
+fatal("--dhcpclass cannot be used with --kea option")
+  if ($opt_dhcpclass && $opt_kea);
 
 
 print "server name: $servername\n",
@@ -3688,6 +3789,7 @@ make_dns() if ($bind_conf || $tiny_conf);
 make_printcap() if ($printer_conf);
 make_dhcp() if ($dhcp_conf);
 make_dhcp6() if ($dhcp6_conf);
+make_kea_dhcp() if ($kea_conf);
 
 # Pause script for test purposes.
 #$| = 1;

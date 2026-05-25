@@ -39,6 +39,98 @@ subtest 'process_dhcpdconf v4' => sub {
 };
 
 # =========================================================================
+# build_kea_from_isc_data - v4
+# =========================================================================
+subtest 'build_kea_from_isc_data v4' => sub {
+    my $conf_file = "$testdata/dhcpd.conf";
+    plan skip_all => "test/dhcpd.conf not found" unless -r $conf_file;
+
+    my %data;
+    process_dhcpdconf($conf_file, \%data, 0);
+    my $kea = build_kea_from_isc_data(\%data, 0);
+
+    ok(ref $kea eq 'HASH', 'KEA conversion returns hashref');
+    ok(ref $kea->{'shared-networks'} eq 'ARRAY', 'shared-networks exported');
+
+    my ($servers1) = grep { $_->{name} eq 'servers1' } @{$kea->{'shared-networks'} || []};
+    ok($servers1, 'servers1 shared-network found');
+    ok(ref $servers1->{subnet4} eq 'ARRAY' && @{$servers1->{subnet4}} > 0,
+       'subnet4 entries present for shared-network');
+
+    my ($subnet) = grep { $_->{subnet} eq '10.10.100.0/24' } @{$servers1->{subnet4} || []};
+    ok($subnet, 'subnet converted from netmask syntax to CIDR');
+
+    ok(ref $subnet->{reservations} eq 'ARRAY' && @{$subnet->{reservations}} > 0,
+       'reservations exported under subnet');
+    my ($ws1) = grep { $_->{hostname} eq 'ws1.middle.earth' } @{$subnet->{reservations} || []};
+    ok($ws1, 'known reservation mapped into subnet');
+    is($ws1->{'ip-address'}, '10.10.100.100', 'reservation IP preserved');
+    is($ws1->{'hw-address'}, '00:30:40:50:60:00', 'reservation hw-address preserved');
+
+        ok($kea->{authoritative}, 'global authoritative mapped');
+        is($kea->{'valid-lifetime'}, 32000, 'default-lease-time mapped to valid-lifetime');
+        is($kea->{'max-valid-lifetime'}, 64000, 'max-lease-time mapped to max-valid-lifetime');
+        ok(defined $kea->{'ddns-send-updates'} && !$kea->{'ddns-send-updates'},
+             'ddns-update-style none mapped to ddns-send-updates=false');
+
+        ok(ref $kea->{'user-context'} eq 'HASH', 'user-context exists for unmapped directives');
+        my $global_extra = join("\n", @{$kea->{'user-context'}{'sauron-isc-extra'} || []});
+        like($global_extra, qr/^allow bootp;/m, 'unmapped global directive preserved');
+
+        my ($chaos) = grep { $_->{name} eq 'CHAOS' } @{$kea->{'shared-networks'} || []};
+        ok($chaos, 'CHAOS shared-network found');
+        my ($subnet30) = grep { $_->{subnet} eq '10.10.30.0/24' } @{$chaos->{subnet4} || []};
+        ok($subnet30, 'terminal subnet found');
+
+        my ($terminal1) = grep { $_->{hostname} eq 'terminal1.middle.earth' } @{$subnet30->{reservations} || []};
+        ok($terminal1, 'group host reservation exported');
+        is($terminal1->{'next-server'}, 'nfs.middle.earth', 'group next-server inherited into reservation');
+
+        my $t1_opts = join("\n", map { $_->{name} . ' ' . ($_->{data} || '') } @{$terminal1->{'option-data'} || []});
+        like($t1_opts, qr/root-path\s+"\/export\/linux-terminal"/, 'group option root-path inherited into reservation');
+};
+
+# =========================================================================
+# build_kea_from_isc_data - multi IP host split
+# =========================================================================
+subtest 'build_kea_from_isc_data multi-ip split' => sub {
+        my ($fh, $tmpfile) = tempfile();
+        print {$fh} <<'CONF';
+shared-network "lab" {
+    subnet 192.0.2.0 netmask 255.255.255.0 {
+        option routers 192.0.2.1;
+    }
+}
+
+host multi.example {
+    fixed-address 192.0.2.10, 192.0.2.11;
+    hardware ethernet 00:11:22:33:44:55;
+}
+CONF
+        close $fh;
+
+        my %data;
+        process_dhcpdconf($tmpfile, \%data, 0);
+        my $kea = build_kea_from_isc_data(\%data, 0);
+
+        my ($lab) = grep { $_->{name} eq 'lab' } @{$kea->{'shared-networks'} || []};
+        ok($lab, 'shared-network from fixture found');
+        my ($subnet) = grep { $_->{subnet} eq '192.0.2.0/24' } @{$lab->{subnet4} || []};
+        ok($subnet, 'fixture subnet found');
+
+        my @multi = grep {
+                defined $_->{'hw-address'} && $_->{'hw-address'} eq '00:11:22:33:44:55'
+        } @{$subnet->{reservations} || []};
+        is(scalar(@multi), 2, 'multi fixed-address host is split into two reservations');
+
+        my %ips = map { $_->{'ip-address'} => 1 } @multi;
+        ok($ips{'192.0.2.10'} && $ips{'192.0.2.11'}, 'both fixed-address values are preserved');
+
+        my %hn = map { $_->{hostname} => 1 } @multi;
+        is(scalar(keys %hn), 2, 'split reservations use unique hostnames');
+};
+
+# =========================================================================
 # KEA format detection
 # =========================================================================
 subtest 'is_kea_dhcpconf detection' => sub {

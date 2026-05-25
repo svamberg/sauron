@@ -892,6 +892,12 @@
   <row><entry><option>--dhcp</></>
        <entry>Generate DHCP (dhcpd) configuration files.</>
   </row>
+  <row><entry><option>--dhcp6</></>
+       <entry>Generate DHCPv6 (dhcpd) configuration files.</>
+  </row>
+  <row><entry><option>--kea</></>
+       <entry>Generate KEA DHCP JSON configuration file (kea-dhcp.json).</>
+  </row>
   <row><entry><option>--printer</></>
        <entry>Generate PRINTER (lpd) configuration files 
               (not yet implemented).</>
@@ -910,10 +916,6 @@
        <entry>Check validity of generated DNS & DHCP configuration files.
               (see <xref linkend="sauron-sec">).</>
   </row>
-  <row><entry><option>--dhcp2</></>
-       <entry>Enable DHCP v2 compatibility mode.</>
-  </row>
-
   <row><entry><option>--mail</></>
        <entry>Enable email notification sending.</>
   </row>

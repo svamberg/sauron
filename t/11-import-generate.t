@@ -10,6 +10,7 @@ use FindBin;
 use lib "$FindBin::Bin/..";
 use Test::More;
 use File::Temp qw(tempdir);
+use JSON::PP;
 
 my $install_dir = $ENV{SAURON_INSTALL_DIR} || '';
 my $dsn         = $ENV{SAURON_TEST_DSN}    || '';
@@ -61,6 +62,68 @@ subtest 'import-dhcp KEA' => sub {
 # =========================================================================
 subtest 'sauron generate' => sub {
     my $gendir = tempdir(CLEANUP => 1);
+
+    my $kea_cmd = "$install_dir/sauron --verbose --kea example $gendir 2>&1";
+    my $kea_out = `$kea_cmd`;
+    is($? >> 8, 0, "sauron --kea exits 0") or diag($kea_out);
+
+    my $kea_file = "$gendir/kea-dhcp.json";
+    ok(-r $kea_file, 'generated KEA JSON output exists');
+    if (-r $kea_file) {
+        my $json_text = '';
+        if (open(my $fh, '<', $kea_file)) {
+            local $/;
+            $json_text = <$fh>;
+            close($fh);
+        } else {
+            fail('KEA JSON output is readable');
+            diag("cannot read $kea_file: $!");
+        }
+
+        my $parsed;
+        my $ok = eval {
+            $parsed = JSON::PP->new()->decode($json_text);
+            1;
+        };
+        ok($ok, 'KEA JSON is valid') or diag($@);
+        if ($ok) {
+            ok(ref $parsed eq 'HASH', 'KEA root is JSON object');
+            ok(exists $parsed->{Dhcp4}, 'KEA output includes Dhcp4 section');
+            ok(exists $parsed->{Dhcp6}, 'KEA output includes Dhcp6 section');
+
+            if (exists $parsed->{Dhcp4} && ref $parsed->{Dhcp4} eq 'HASH') {
+                ok($parsed->{Dhcp4}{authoritative}, 'DHCP4 authoritative is exported');
+                ok(defined $parsed->{Dhcp4}{'valid-lifetime'}, 'DHCP4 valid-lifetime is exported');
+
+                my $terminal1;
+                for my $sn (@{$parsed->{Dhcp4}{'shared-networks'} || []}) {
+                    for my $sub (@{$sn->{subnet4} || []}) {
+                        for my $res (@{$sub->{reservations} || []}) {
+                            if (($res->{hostname} || '') eq 'terminal1.middle.earth') {
+                                $terminal1 = $res;
+                                last;
+                            }
+                        }
+                        last if $terminal1;
+                    }
+                    last if $terminal1;
+                }
+
+                ok($terminal1, 'group-based reservation terminal1 is exported');
+                if ($terminal1) {
+                    is($terminal1->{'next-server'}, 'nfs.middle.earth',
+                       'group next-server inherited in KEA reservation');
+                    my $opts = join("\n", map { ($_->{name} || '') . ' ' . ($_->{data} || '') }
+                                         @{$terminal1->{'option-data'} || []});
+                    like($opts, qr/root-path\s+"\/export\/linux-terminal"/,
+                         'group root-path option inherited in KEA reservation');
+                }
+            }
+        }
+    }
+
+    ok(!-e "$gendir/dhcpd.conf", '--kea standalone does not keep dhcpd.conf');
+    ok(!-e "$gendir/dhcpd6.conf", '--kea standalone does not keep dhcpd6.conf');
 
     for my $mode (qw(--bind --dhcp --dhcp6)) {
         my $cmd = "$install_dir/sauron --verbose $mode example $gendir 2>&1";
