@@ -76,6 +76,18 @@ Recommended configuration for new/updated deployments:
  - SAURON_CHARSET = 'utf-8'
  - BROWSER_CHARSET = 'utf-8'
 
+Detection helper (no DB changes):
+ - dbcheck --check=encoding --verbose --yes
+ - Optional custom character seed:
+   dbcheck --check=encoding --verbose --yes --mojibake-chars='ž,š,ť'
+   (you can also pass a plain string, e.g. --mojibake-chars='žšť')
+ - Optional target charset used for mojibake generation/repair:
+   dbcheck --check=encoding --verbose --yes --mojibake-charset='cp1250'
+
+Optional assisted repair (interactive, requires --commit):
+ - dbcheck --check=encoding --verbose --commit
+ - You can review/edit found rows before applying updates.
+
 If old data is already mojibake-corrupted (for example "Å¾luÅ¥ouÄ\x8DkÃ½"):
  - Run a one-time repair only for affected rows, then verify manually.
  - Example for zone comments (adjust WHERE to your dataset):

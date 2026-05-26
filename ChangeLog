@@ -7,9 +7,14 @@
 	    charset is UTF-8 (backward-compatible with legacy non-UTF setups)
 	  - Added compatibility repair path in form handling for common mojibake
 	    patterns in UTF-8 mode
+	  - Added dbcheck encoding detector:
+	    --check=encoding [--mojibake-chars=<chars>] [--mojibake-charset=<enc>]
+	    to scan text columns for likely mojibake patterns generated from
+	    selected diacritics
+	  - dbcheck encoding check now also supports interactive repair when
+	    used with --commit (still non-destructive without --commit)
 	  - Added upgrade notes for one-time repair of already corrupted records
 	    (README.upgrade)
-
 	- Added KEA DHCP configuration import support: parses KEA JSON 
 	  configs (DHCPv4/DHCPv6) and converts subnets, pools, reservations, 
 	  shared-networks and options to ISC-like internal format used 
