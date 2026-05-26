@@ -45,7 +45,7 @@ sub set_defaults() {
 
   $main::SAURON_DEBUG_MODE = 0;
   $main::SAURON_PRIVILEGE_MODE = 0;
-  $main::SAURON_CHARSET='iso-8859-1';
+  $main::SAURON_CHARSET='utf-8';
   $main::SAURON_PWD_MODE = 1;
   $main::SAURON_DHCP2_MODE = 0;
   $main::SAURON_MAIL_FROM = '';
@@ -279,7 +279,7 @@ sub load_browser_config() {
 
   # set defaults
   $main::BROWSER_MAX = 100;
-  $main::BROWSER_CHARSET = 'iso-8859-1';
+  $main::BROWSER_CHARSET = 'utf-8';
   $main::BROWSER_SHOW_FIELDS = 'huser,location,info,dept';
   $main::BROWSER_HIDE_PRIVATE = 1;
   $main::BROWSER_HIDE_FIELDS = 'huser,location';

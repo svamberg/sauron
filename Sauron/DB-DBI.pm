@@ -67,11 +67,14 @@ sub db_connect2() {
   $user = ($main::DB_USER ? $main::DB_USER : '');
   $password = ($main::DB_PASSWORD ? $main::DB_PASSWORD : '');
 
-  $dbh = DBI->connect($dsn,$user,$password);
+  $dbh = DBI->connect($dsn,$user,$password,{ pg_enable_utf8 => 1 });
   unless ($dbh) {
     error("db_connect() failed: " . $DBI::errstr);
     return 0;
   }
+
+  # Keep DB connection text encoding consistent with CGI UTF-8 handling.
+  $dbh->do("SET client_encoding TO 'UTF8'");
 
   return 1;
 }

@@ -1,5 +1,15 @@
 0.9.0 (beta)
 
+	- Fixed UTF-8 corruption in CGI edit/save flow (notably zone comments)
+	  where text could degrade to mojibake on repeated updates [svamberg]
+	  - DBI backend now enables pg_enable_utf8 and forces UTF8 client encoding
+	  - CGI request UTF-8 parameter decoding is enabled only when configured
+	    charset is UTF-8 (backward-compatible with legacy non-UTF setups)
+	  - Added compatibility repair path in form handling for common mojibake
+	    patterns in UTF-8 mode
+	  - Added upgrade notes for one-time repair of already corrupted records
+	    (README.upgrade)
+
 	- Added KEA DHCP configuration import support: parses KEA JSON 
 	  configs (DHCPv4/DHCPv6) and converts subnets, pools, reservations, 
 	  shared-networks and options to ISC-like internal format used 

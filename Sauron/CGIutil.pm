@@ -13,6 +13,7 @@ use Sauron::Util;
 use Sauron::BackEnd;
 use Net::IP qw(:PROC);
 use HTML::Entities;
+use Encode qw(encode decode FB_CROAK);
 # use Data::Dumper;
 
 use strict;
@@ -403,6 +404,24 @@ sub remove_whitespace($$) {
     return $val;
 }
 
+# Repair typical UTF-8 mojibake caused by ISO-8859-1 decoding in CGI layer.
+# If conversion is not safe/applicable, keep original value unchanged.
+sub fix_param_utf8($) {
+  my ($val) = @_;
+
+  return $val unless defined $val;
+  return $val if $val eq '';
+  return $val unless ((($main::SAURON_CHARSET // '') =~ /utf-?8/i) ||
+                      (($main::BROWSER_CHARSET // '') =~ /utf-?8/i));
+
+  my $fixed = eval {
+    my $octets = encode('ISO-8859-1', $val, FB_CROAK);
+    decode('UTF-8', $octets, FB_CROAK);
+  };
+
+  return defined $fixed ? $fixed : $val;
+}
+
 #####################################################################
 # form_check_form($prefix,$data,$form)
 #
@@ -470,7 +489,7 @@ sub form_check_form($$$) {
       next unless ($val =~ /^($e)$/);
     }
 
-    $val=param($p);
+    $val=fix_param_utf8(param($p));
     $val="\L$val" if ($rec->{conv} eq 'L');
     $val="\U$val" if ($rec->{conv} eq 'U');
 
@@ -550,8 +569,8 @@ sub form_check_form($$$) {
       $data->{$tag}=$val;
     }
     elsif ($type == 101) {
-      $tmp=param($p);
-      $tmp=param($p."_l") if ($tmp eq '');
+      $tmp=fix_param_utf8(param($p));
+      $tmp=fix_param_utf8(param($p."_l")) if ($tmp eq '');
       return 101 if (form_check_field($rec,$tmp,0) ne '');
       $data->{$tag}=$tmp;
     }
@@ -574,11 +593,11 @@ sub form_check_form($$$) {
 # Remove unnecessary whitespace from indexed input fields.
 # **	  if ($rec->{rows}
 	  param($p."_".$j."_".$k,
-	        remove_whitespace(param($p."_".$j."_".$k),
+	        remove_whitespace(fix_param_utf8(param($p."_".$j."_".$k)),
 				  $rec->{'whitesp'}[$k-1] || ''));
-          $tmp=param($p."_".$j."_".$k);
+          $tmp=fix_param_utf8(param($p."_".$j."_".$k));
           if ($rec->{type}[$k-1] eq 'enum') {
-            $tmp=param($p."_".$j."_".$k."_enum") if ($tmp eq '');
+            $tmp=fix_param_utf8(param($p."_".$j."_".$k."_enum")) if ($tmp eq '');
           }
 	  return 2
 	    if (form_check_field($rec,$tmp,$k) ne '');
@@ -609,9 +628,9 @@ sub form_check_form($$$) {
 	    $new=[];
 	    $$new[$f+1]=2;
 	    for $k (1..$f) {
-	      $tmp=param($p2."_".$k);
+	      $tmp=fix_param_utf8(param($p2."_".$k));
               if ($rec->{type}[$k-1] eq 'enum') {
-                $tmp=param($p2."_".$k."_enum") if ($tmp eq '');
+                $tmp=fix_param_utf8(param($p2."_".$k."_enum")) if ($tmp eq '');
               }
 	      $tmp=($tmp eq 'on' ? 't':'f') if ($type==5 && $k>1);
 	      $$new[$k]=$tmp;
@@ -621,9 +640,9 @@ sub form_check_form($$$) {
 	    for $k (1..$f) {
 	      if (param($p2."_".$k) ne $$list[$ind][$k]) {
 		$$list[$ind][$f+1]=1;
-		$tmp=param($p2."_".$k);
+		$tmp=fix_param_utf8(param($p2."_".$k));
                 if ($rec->{type}[$k-1] eq 'enum') {
-                  $tmp=param($p2."_".$k."_enum") if ($tmp eq '');
+                  $tmp=fix_param_utf8(param($p2."_".$k."_enum")) if ($tmp eq '');
                 }
 		$tmp=($tmp eq 'on' ? 't':'f') if ($type==5 && $k>1);
 		$$list[$ind][$k]=$tmp;
@@ -648,7 +667,7 @@ sub form_check_form($$$) {
       }
     }
     elsif ($type == 6 || $type == 7 || $type == 10) {
-      my $val = param($p);
+      my $val = fix_param_utf8(param($p));
       # Allow empty value if field has empty=>1
       if ($val eq '' && $rec->{empty}) {
         $data->{$tag} = -1;  # Set to -1 for empty optional groups
@@ -660,7 +679,8 @@ sub form_check_form($$$) {
     }
     elsif ($type == 13) { # Textarea (check input) 12 Apr 2017 TVu
 # Some sources say that line breaks in textarea depend on the client.
-	$val =~ s/\r(?=\n)//gms; # cr/nl => nl (for Windows client)
+  $val = fix_param_utf8($val);
+  $val =~ s/\r(?=\n)//gms; # cr/nl => nl (for Windows client)
 	$val =~ s/\r/\n/gms; # cr => nl (for Mac client)
 	my @val_arr = split(/\n/, $val);
 	my @val_arr2;

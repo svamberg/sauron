@@ -61,6 +61,32 @@ If you experience issues during migration:
  4) Consult documentation or file a bug report
 
 
+UTF-8 WEB INPUT/OUTPUT COMPATIBILITY (0.9.0)
+
+Sauron 0.9.0 now supports UTF-8 end-to-end in CGI/DBI path by default
+(DBI with pg_enable_utf8 and UTF-8 request handling when configured charset
+is UTF-8).
+
+Compatibility behavior:
+ - UTF-8 request handling is enabled only when configured CGI charset is UTF-8
+   (SAURON_CHARSET/BROWSER_CHARSET =~ /utf-?8/i).
+ - Legacy non-UTF-8 deployments keep previous behavior.
+
+Recommended configuration for new/updated deployments:
+ - SAURON_CHARSET = 'utf-8'
+ - BROWSER_CHARSET = 'utf-8'
+
+If old data is already mojibake-corrupted (for example "Å¾luÅ¥ouÄ\x8DkÃ½"):
+ - Run a one-time repair only for affected rows, then verify manually.
+ - Example for zone comments (adjust WHERE to your dataset):
+
+   UPDATE zones
+      SET comment = convert_from(convert_to(comment,'LATIN1'),'UTF8')
+    WHERE comment LIKE '%Ã%';
+
+Always run a database backup before mass text repair.
+
+
 
 GENERAL UPGRADE PROCEDURE
 

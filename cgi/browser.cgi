@@ -39,6 +39,7 @@ $0 = $PG_NAME;
 $debug_mode = 0;
 
 load_browser_config();
+$CGI::PARAM_UTF8 = 1 if (($BROWSER_CHARSET // '') =~ /utf-?8/i);
 
 
 #%host_types=(0=>'Any type',1=>'Host',2=>'Delegation',3=>'Plain MX',
