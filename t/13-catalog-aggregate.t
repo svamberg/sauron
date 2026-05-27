@@ -383,9 +383,9 @@ subtest 'generate aggregate zone file' => sub {
     # Find the uuid for shared's PTR line and check its group
     my $shared_zone_id = get_zone_id('shared.example.com', $serverid);
     if ($shared_zone_id > 0) {
-        like($content, qr/uuid-$shared_zone_id\.zones\.catalog\s+.*\s+PTR\s+shared\.example\.com\./,
+          like($content, qr/uuid-$shared_zone_id\.zones\s+.*\s+PTR\s+shared\.example\.com\./,
              'shared uses correct uuid in aggregate');
-        like($content, qr/group\.uuid-$shared_zone_id\.zones\.catalog\s+.*\s+TXT\s+"shared-group"/,
+          like($content, qr/group\.uuid-$shared_zone_id\.zones\s+.*\s+TXT\s+"shared-group"/,
              'shared group from catalog1 (priority 10) wins');
     }
 
@@ -450,10 +450,10 @@ $ORIGIN catalog1.example.com.
 		2024020101 3600 900 604800 0 )
 	IN	NS	invalid.
 version.catalog		IN	TXT	"2"
-uuid-002.zones.catalog	IN	PTR	beta.example.com.
-uuid-003.zones.catalog	IN	PTR	shared.example.com.
-group.uuid-002.zones.catalog	IN	TXT	"backend"
-group.uuid-003.zones.catalog	IN	TXT	"shared-group"
+uuid-002.zones	IN	PTR	beta.example.com.
+uuid-003.zones	IN	PTR	shared.example.com.
+group.uuid-002.zones	IN	TXT	"backend"
+group.uuid-003.zones	IN	TXT	"shared-group"
 ZONE
     close($fh);
 
@@ -503,9 +503,9 @@ $ORIGIN catalog1.example.com.
 		2024030101 3600 900 604800 0 )
 	IN	NS	invalid.
 version.catalog		IN	TXT	"2"
-uuid-002.zones.catalog	IN	PTR	beta.example.com.
-uuid-003.zones.catalog	IN	PTR	shared.example.com.
-uuid-004.zones.catalog	IN	PTR	newzone.example.com.
+uuid-002.zones	IN	PTR	beta.example.com.
+uuid-003.zones	IN	PTR	shared.example.com.
+uuid-004.zones	IN	PTR	newzone.example.com.
 ZONE
     close($fh);
 
@@ -595,7 +595,7 @@ subtest 'generate after priority swap - conflict winner changes' => sub {
     # With catalog1 at priority=1 (wins), shared's group should be from catalog1
     my $shared_zid = get_zone_id('shared.example.com', $serverid);
     if ($shared_zid > 0) {
-        like($content, qr/group\.uuid-$shared_zid\.zones\.catalog\s+.*\s+TXT\s+"shared-group"/,
+        like($content, qr/group\.uuid-$shared_zid\.zones\s+.*\s+TXT\s+"shared-group"/,
              'shared group from catalog1 (now priority=1) wins');
     }
 };
@@ -676,10 +676,10 @@ $ORIGIN catalog1.example.com.
 		2024040101 3600 900 604800 0 )
 	IN	NS	invalid.
 version.catalog		IN	TXT	"2"
-uuid-002.zones.catalog	IN	PTR	beta.example.com.
-uuid-003.zones.catalog	IN	PTR	shared.example.com.
-group.uuid-002.zones.catalog	IN	TXT	"should-be-ignored"
-group.uuid-003.zones.catalog	IN	TXT	"should-be-ignored"
+uuid-002.zones	IN	PTR	beta.example.com.
+uuid-003.zones	IN	PTR	shared.example.com.
+group.uuid-002.zones	IN	TXT	"should-be-ignored"
+group.uuid-003.zones	IN	TXT	"should-be-ignored"
 ZONE
     close($fh);
 

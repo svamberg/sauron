@@ -1733,13 +1733,13 @@ sub make_dns() {
           my $member_groups = $catalog_rec->{members}[$i][7];
           $member_zone =~ s/\.$//;  # Remove trailing dot
 
-          printf ZONEFILE $ZFORMAT, "uuid-$member_id.zones.catalog",$ttl,'IN','PTR',"$member_zone."
+          printf ZONEFILE $ZFORMAT, "uuid-$member_id.zones",$ttl,'IN','PTR',"$member_zone."
             if ($bind_conf);
 
           # Group property TXT records (RFC 9432 §5.2)
           if ($bind_conf && ref($member_groups) eq 'ARRAY') {
             for my $grp (@{$member_groups}) {
-              printf ZONEFILE $ZFORMAT, "group.uuid-$member_id.zones.catalog",
+              printf ZONEFILE $ZFORMAT, "group.uuid-$member_id.zones",
                   $ttl,'IN','TXT',"\"$grp\"";
             }
           }
@@ -1789,13 +1789,13 @@ sub make_dns() {
             $seen_names{$lc_name} = "$src_name (prio=$prio)";
 
             printf ZONEFILE $ZFORMAT,
-                "uuid-$mzone_id.zones.catalog",
+                "uuid-$mzone_id.zones",
                 $ttl, 'IN', 'PTR', "$mzone_name.";
 
             if (ref($mgroups) eq 'ARRAY') {
               for my $grp (@{$mgroups}) {
                 printf ZONEFILE $ZFORMAT,
-                    "group.uuid-$mzone_id.zones.catalog",
+                    "group.uuid-$mzone_id.zones",
                     $ttl, 'IN', 'TXT', "\"$grp\"";
               }
             }
