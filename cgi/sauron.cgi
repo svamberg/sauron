@@ -52,6 +52,7 @@ my ($PG_DIR,$PG_NAME) = ($0 =~ /^(.*\/)(.*)$/);
 $0 = $PG_NAME;
 
 load_config();
+$CGI::PARAM_UTF8 = 1 if (($SAURON_CHARSET // '') =~ /utf-?8/i);
 
 my $SAURON_CGI_VER = ' $Revision: 1.204 $ $Date: 2005/01/27 09:24:44 $ ';
 $debug_mode = $SAURON_DEBUG_MODE;
