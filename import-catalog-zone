@@ -150,6 +150,10 @@ print "Detected source catalog origin: $source_origin\n" if ($opt_verbose);
 #
 # Structure:
 #   version.catalog.<origin>  TXT "2"
+#   <uuid>.zones.<origin>  PTR <member-zone-name>.
+#   group.<uuid>.zones.<origin>  TXT "<group-name>"
+#
+# Legacy Sauron format also accepted:
 #   <uuid>.zones.catalog.<origin>  PTR <member-zone-name>.
 #   group.<uuid>.zones.catalog.<origin>  TXT "<group-name>"
 
@@ -168,17 +172,18 @@ if ($zonedata{$version_key} && @{$zonedata{$version_key}{TXT}} > 0) {
 }
 
 # Extract member zones and group assignments
-# Sauron generator uses 'uuid-xxx.zones.catalog' and 'group.uuid-xxx.zones.catalog'
-# relative to zone origin, expanding to '*.zones.catalog.<origin>'.
+# Accept both RFC 9432 canonical names (*.zones.<origin>) and
+# legacy Sauron names (*.zones.catalog.<origin>).
 %members = ();  # uuid => { name => 'zone.name', groups => ['g1', ...] }
-$zones_suffix = "zones.catalog.$source_origin";
+$member_re = qr/^([^.]+)\.zones(?:\.catalog)?\.\Q$source_origin\E$/i;
+$group_re = qr/^group\.([^.]+)\.zones(?:\.catalog)?\.\Q$source_origin\E$/i;
 
 foreach $domain (keys %zonedata) {
     my $rec = $zonedata{$domain};
 
-    # Match PTR records under *.zones.catalog.<origin>
-    # Format: <uuid>.zones.catalog.<origin> PTR <member-zone>.
-    if ($domain =~ /^([^.]+)\.\Q$zones_suffix\E$/i && @{$rec->{PTR}} > 0) {
+    # Match PTR records under *.zones.<origin> (and legacy *.zones.catalog.<origin>)
+    # Format: <uuid>.zones.<origin> PTR <member-zone>.
+    if ($domain =~ $member_re && @{$rec->{PTR}} > 0) {
 	my $uuid = $1;
 	my $member_name = $rec->{PTR}[0];
 	$member_name =~ s/\.$//;  # strip trailing dot
@@ -188,10 +193,10 @@ foreach $domain (keys %zonedata) {
 	next;
     }
 
-    # Match group TXT records: group.<uuid>.zones.catalog.<origin>
-    # Format: group.<uuid>.zones.catalog.<origin> TXT "<group-name>"
+    # Match group TXT records: group.<uuid>.zones.<origin>
+    # Legacy form group.<uuid>.zones.catalog.<origin> is also accepted.
     if (!$opt_ignore_groups &&
-	$domain =~ /^group\.([^.]+)\.\Q$zones_suffix\E$/i && @{$rec->{TXT}} > 0) {
+	$domain =~ $group_re && @{$rec->{TXT}} > 0) {
 	my $uuid = $1;
 	$members{$uuid} = { name => '', groups => [] }
 	    unless ($members{$uuid});
