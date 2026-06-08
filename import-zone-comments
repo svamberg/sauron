@@ -585,7 +585,7 @@ sub comment_soa($) {
 # import_comments
 # ---------------
 sub import_comments($$$) {
-  my ($data, $server, $zone) = shift @_;
+  my ($data, $server, $zone) = @_;
   my ($rec, $res, $ret, $sql, $comment, $blcomment);
 
   #print "$data\n";
@@ -629,13 +629,14 @@ sub import_comments($$$) {
     }
     elsif ($$rec{rtype} eq 'MX' and $$rec{owner}) {
       my ($mx_pref, $mx_exchange) = split /\s+/, $$rec{rdata};
+      my $host_id = get_host_id($zoneid, $$rec{owner});
       $sql = qq{
           UPDATE mx_entries
              SET comment = $comment
-           WHERE zone   = '$zoneid'
-             AND domain = '$$rec{owner}'
-             AND pref   = '$mx_pref'
-             AND exchange = '$mx_exchange'
+           WHERE ref  = '$host_id'
+             AND type = '2'
+             AND pri  = '$mx_pref'
+             AND mx   = '$mx_exchange'
              AND (comment IS NULL OR comment = '')
       };
       db_exec($sql) unless $opt_noop;
