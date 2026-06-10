@@ -201,15 +201,40 @@ foreach $host (sort keys %zonedata) {
 
   $nslist = db_build_list_str($rec->{NS});
   $host2 = remove_origin($host,$origin);
+  
+  # Determine hosttype based on record types present
+  # Use explicit checks to avoid overwriting previous assignments
+  my $has_ip = (@{$rec->{A}} > 0 || @{$rec->{AAAA}} > 0);
+  my $has_ns = ($nslist && $nslist ne '');
+  my $has_mx = (@{$rec->{MX}} > 0);
+  my $has_srv = (@{$rec->{SRV}} > 0);
+  my $has_tlsa = (@{$rec->{TLSA}} > 0);
+  my $has_txt = (@{$rec->{TXT}} > 0);
+  my $has_naptr = (@{$rec->{NAPTR}} > 0);
+  my $has_caa = (@{$rec->{CAA}} > 0);
+  my $has_sshfp = (@{$rec->{SSHFP}} > 0);
+  
   $hosttype=0;
-  $hosttype=1 if (@{$rec->{A}} > 0 || @{$rec->{AAAA}} > 0);
-  $hosttype=2 if ($nslist && $host2 ne '@');
-  $hosttype=3 if ($nslist eq '' && @{$rec->{A}} < 1 && @{$rec->{AAAA}} < 1 && @{$rec->{MX}} > 0);
-  $hosttype=8 if (@{$rec->{SRV}} > 0);
-  $hosttype=12 if (@{$rec->{TLSA}} > 0);
-  $hosttype=13 if ((@{$rec->{TXT}} > 0) and $hosttype == 0);
-  $hosttype=14 if (@{$rec->{NAPTR}} > 0);
-  $hosttype=15 if (@{$rec->{CAA}} > 0 && $hosttype == 0);
+  # Priority-based hosttype assignment (higher priority types checked first)
+  if ($has_ns && $host2 ne '@') {
+    $hosttype=2;  # delegation/glue record
+  } elsif ($has_ip) {
+    $hosttype=1;  # regular host with IP address
+  } elsif ($has_mx && !$has_ns) {
+    $hosttype=3;  # MX only (no IP, no NS)
+  } elsif ($has_srv) {
+    $hosttype=8;  # SRV records
+  } elsif ($has_tlsa) {
+    $hosttype=12; # TLSA records
+  } elsif ($has_txt && !$has_ip) {
+    $hosttype=13; # TXT only (no IP)
+  } elsif ($has_naptr) {
+    $hosttype=14; # NAPTR records
+  } elsif ($has_caa && !$has_ip) {
+    $hosttype=15; # CAA only (no IP)
+  } elsif ($has_sshfp) {
+    $hosttype=11; # SSHFP only (no IP)
+  }
 
   if ($hosttype == 0) {
     print STDERR "Ignoring unknown host entry: $host\n";
