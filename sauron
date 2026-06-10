@@ -965,7 +965,7 @@ sub make_dns() {
               for $k (0 .. $#{$txt}) {
                   $val=$$txt[$k];
                   $val =~ s/\"//g;
-                  $padding = length(sprintf ZONEFILE $ZFORMAT, '',$ttl,$class,'TXT','');
+                  $padding = length(sprintf $ZFORMAT, '',$ttl,$class,'TXT','');
                   printf ZONEFILE $ZFORMAT, '',$ttl,$class,'TXT',
                       bind_fmt_long_data("$val", $padding)
                       if ($bind_conf);
