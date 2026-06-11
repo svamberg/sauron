@@ -1079,3 +1079,73 @@
 
 </section>
 
+
+<section id="keygen-cmd">
+<title>keygen</>
+<para>
+  This utility is used to create, delete, list, and regenerate TSIG or DNSSEC
+  keys for servers managed by Sauron. TSIG keys are used for authenticated DNS
+  zone transfers (AXFR) and dynamic updates.
+</para>
+<cmdsynopsis>
+  <command>keygen</>
+  <arg>--help</>
+  <arg>--setmasterkey=<replaceable>passphrase</></>
+  <arg>--add=<replaceable>spec</></>
+  <arg>--del=<replaceable>spec</></>
+  <arg>--regen=<replaceable>spec</></>
+  <arg>--list=<replaceable>server</></>
+  <arg>--algorithm=<replaceable>alg</></>
+  <arg>--verbose</>
+</cmdsynopsis>
+<para>
+  The <command>keygen</> utility manages TSIG and DNSSEC keys in the Sauron
+  database. For TSIG keys, it uses the <command>tsig-keygen</> program from
+  BIND to generate cryptographically secure keys. The generated keys are
+  encrypted using RC5 with PBKDF2 key derivation before being stored in the
+  database.
+</para>
+<para>
+  Supported TSIG algorithms (specified with <option>--algorithm</>):
+</para>
+<itemizedlist>
+  <listitem><para><literal>HMAC-SHA256</literal> (default, recommended)</para></listitem>
+  <listitem><para><literal>HMAC-SHA384</literal></para></listitem>
+  <listitem><para><literal>HMAC-SHA512</literal></para></listitem>
+  <listitem><para><literal>HMAC-SHA1</literal></para></listitem>
+  <listitem><para><literal>HMAC-MD5</literal> (legacy, not recommended)</para></listitem>
+</itemizedlist>
+<para>
+  <option>--add</> argument format:
+  <literal>server,keyname,TSIG,keylength[,comment[,key]]</literal>
+</para>
+<para>
+  Examples:
+</para>
+<screen>
+# Add a new TSIG key with default algorithm (HMAC-SHA256)
+keygen --add="dns.example.com,axfr-key,TSIG,256,Zone transfer key"
+
+# Add a key with explicit algorithm
+keygen --algorithm=HMAC-SHA384 --add="dns.example.com,axfr-key2,TSIG,384,comment"
+
+# List all keys for a server
+keygen --list="dns.example.com"
+
+# Delete a key
+keygen --del="dns.example.com,axfr-key"
+
+# Regenerate all auto-generated keys for a server
+keygen --regen="dns.example.com,TSIG"
+</screen>
+<para>
+  The master key (<option>--setmasterkey</>) is used to encrypt all TSIG keys
+  stored in the database. This key should be stored securely in
+  <filename>/etc/sauron/config.key</filename>.
+</para>
+<para>
+  See also: <xref linkend="sauron-cmd"/> for generating BIND configuration
+  files that include TSIG keys.
+</para>
+</section>
+

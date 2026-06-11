@@ -1,5 +1,19 @@
 0.9.0 (beta)
 
+	- TSIG key generation improvements for modern BIND versions [svamberg]
+	  - Updated keygen to use tsig-keygen instead of dnssec-keygen for TSIG keys
+	    (dnssec-keygen no longer supports HMAC-* algorithms in BIND 9.18+)
+	  - Added support for multiple TSIG algorithms:
+	    * HMAC-SHA256 (default, algorithm ID 159)
+	    * HMAC-SHA384 (algorithm ID 160)
+	    * HMAC-SHA512 (algorithm ID 161)
+	    * HMAC-SHA1 (algorithm ID 158)
+	    * HMAC-MD5 (algorithm ID 157, legacy)
+	  - Added --algorithm option to keygen for explicit algorithm selection
+	    Example: keygen --algorithm=HMAC-SHA384 --add="server,key,TSIG,384,comment"
+	  - Fixed "input size not equal to blocksize (8)" error when adding TSIG keys
+	  - Uses Crypt::CBC with RC5 and PBKDF2 key derivation for secure storage
+	  - Added t/15-keygen.t test suite (16 tests) for key generation validation
 	- Fixed UTF-8 corruption in CGI edit/save flow (notably zone comments)
 	  where text could degrade to mojibake on repeated updates [svamberg]
 	  - DBI backend now enables pg_enable_utf8 and forces UTF8 client encoding

@@ -57,7 +57,7 @@ jobs:
           PERL5LIB: ${{ github.workspace }}
         run: |
           set -e
-          prove -lv t/0*.t t/14-hosttype.t
+          prove -lv t/0*.t t/14-hosttype.t t/15-keygen.t
         shell: bash
 
   # =================================================================
