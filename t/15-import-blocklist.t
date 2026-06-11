@@ -157,7 +157,7 @@ subtest 'Setup: Create test zone' => sub {
         ok(1, "Using existing test RPZ zone");
     } else {
         # Create test RPZ zone
-        $out = run_psql("INSERT INTO zones (name, server, type, comment) VALUES ('test-rpz.example.cz', $serverid, 'master', 'Test RPZ zone') RETURNING id");
+        $out = run_psql("INSERT INTO zones (name, server, type, comment) VALUES ('test-rpz.example.cz', $serverid, 'M', 'Test RPZ zone') RETURNING id");
         if ($out && $out =~ /^\d+$/ && $out > 0) {
             $zoneid = $out;
             ok(1, "Created test RPZ zone");
