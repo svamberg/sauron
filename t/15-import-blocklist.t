@@ -23,12 +23,21 @@ unless ($dsn && $install_dir && -d $install_dir) {
 my $testdata = "$FindBin::Bin/../test";
 my $tmpdir   = tempdir(CLEANUP => 1);
 
+sub shell_quote {
+    my ($s) = @_;
+    $s = '' unless defined $s;
+    $s =~ s/'/'"'"'/g;
+    return "'$s'";
+}
+
 # Helper to run import-blocklist
 sub run_import {
     my (@args) = @_;
-    my $cmd = "$install_dir/import-blocklist " . join(' ', @args) . " 2>&1";
+    my $cmd = shell_quote("$install_dir/import-blocklist") . ' '
+        . join(' ', map { shell_quote($_) } @args) . ' 2>&1';
     my $out = `$cmd`;
-    return ($? >> 8, $out);
+    my $exit = ($? == -1) ? -1 : ($? >> 8);
+    return ($exit, $out);
 }
 
 # Create test CSV file with blocklist data
@@ -92,20 +101,35 @@ my $db_name  = $ENV{POSTGRES_DB} || 'sauron';
 # Helper function to run psql commands
 sub run_psql {
     my ($sql) = @_;
-    
-    # Try using psql with environment variables (no sudo needed)
-    my $pgpassword = $ENV{PGPASSWORD} || '';
-    my $cmd;
-    if ($pgpassword) {
-        $cmd = qq{PGPASSWORD='$pgpassword' psql -h $db_host -U $db_user -d $db_name -P pager=off -t -c "$sql" 2>&1};
-    } else {
-        $cmd = qq{psql -h $db_host -U $db_user -d $db_name -P pager=off -t -c "$sql" 2>&1};
+
+    # Use machine-friendly psql output and stop immediately on SQL errors.
+    my $cmd = 'psql -X -q -A -t -v ON_ERROR_STOP=1 '
+        . '-h ' . shell_quote($db_host) . ' '
+        . '-U ' . shell_quote($db_user) . ' '
+        . '-d ' . shell_quote($db_name) . ' '
+        . '-P pager=off -c ' . shell_quote($sql) . ' 2>&1';
+    if (length $db_pass) {
+        $cmd = 'PGPASSWORD=' . shell_quote($db_pass) . ' ' . $cmd;
     }
-    
+
     my $out = `$cmd`;
-    chomp($out);
-    $out =~ s/\s+//g;
-    return $out;
+    my @lines = grep { length $_ } map {
+        my $line = $_;
+        $line =~ s/\r//g;
+        $line =~ s/^\s+//;
+        $line =~ s/\s+$//;
+        $line;
+    } split /\n/, $out;
+
+    for my $line (@lines) {
+        return $line if $line =~ /^\d+$/;
+    }
+
+    for my $line (@lines) {
+        return $line if $line =~ /^ERROR:/;
+    }
+
+    return $lines[0] // '';
 }
 
 subtest 'Setup: Create test zone' => sub {
@@ -117,10 +141,12 @@ subtest 'Setup: Create test zone' => sub {
     } else {
         # Create test server
         $out = run_psql("INSERT INTO servers (name, comment) VALUES ('test-server', 'Test server') RETURNING id");
-        chomp($out);
-        $out =~ s/\s+//g;
-        $serverid = $out;
-        ok($serverid > 0, "Created test server");
+        if ($out && $out =~ /^\d+$/ && $out > 0) {
+            $serverid = $out;
+            ok(1, "Created test server");
+        } else {
+            BAIL_OUT("Failed to create test server: $out");
+        }
     }
     
     # Check if zone exists
@@ -128,18 +154,21 @@ subtest 'Setup: Create test zone' => sub {
     
     if ($out && $out =~ /^\d+$/) {
         $zoneid = $out;
-        plan skip_all => 'Zone already exists, skipping setup';
+        ok(1, "Using existing test RPZ zone");
     } else {
         # Create test RPZ zone
         $out = run_psql("INSERT INTO zones (name, server, type, comment) VALUES ('test-rpz.example.cz', $serverid, 'master', 'Test RPZ zone') RETURNING id");
-        chomp($out);
-        $out =~ s/\s+//g;
-        $zoneid = $out;
-        ok($zoneid > 0, "Created test RPZ zone");
+        if ($out && $out =~ /^\d+$/ && $out > 0) {
+            $zoneid = $out;
+            ok(1, "Created test RPZ zone");
+        } else {
+            BAIL_OUT("Failed to create test RPZ zone: $out");
+        }
     }
 };
 
-plan skip_all => 'Failed to setup test zone' unless $zoneid;
+plan skip_all => 'Failed to setup test zone'
+    unless (defined $zoneid && $zoneid =~ /^\d+$/ && $zoneid > 0);
 
 # =========================================================================
 # Test 1: Import initial blocklist
