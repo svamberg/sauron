@@ -83,19 +83,40 @@ EOF
 my $serverid;
 my $zoneid;
 
-subtest 'Setup: Create test zone' => sub {
-    # First we need to find or create a server
-    my $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -t -c "SELECT id FROM servers WHERE name='test-server'" 2>&1};
+# Database connection parameters from environment
+my $db_user  = $ENV{SAURON_TEST_USER} || $ENV{PGUSER} || 'postgres';
+my $db_pass  = $ENV{SAURON_TEST_PASSWORD} || $ENV{PGPASSWORD} || '';
+my $db_host  = $ENV{PGHOST} || 'localhost';
+my $db_name  = $ENV{POSTGRES_DB} || 'sauron';
+
+# Helper function to run psql commands
+sub run_psql {
+    my ($sql) = @_;
+    
+    # Try using psql with environment variables (no sudo needed)
+    my $pgpassword = $ENV{PGPASSWORD} || '';
+    my $cmd;
+    if ($pgpassword) {
+        $cmd = qq{PGPASSWORD='$pgpassword' psql -h $db_host -U $db_user -d $db_name -P pager=off -t -c "$sql" 2>&1};
+    } else {
+        $cmd = qq{psql -h $db_host -U $db_user -d $db_name -P pager=off -t -c "$sql" 2>&1};
+    }
+    
     my $out = `$cmd`;
     chomp($out);
     $out =~ s/\s+//g;
+    return $out;
+}
+
+subtest 'Setup: Create test zone' => sub {
+    # First we need to find or create a server
+    my $out = run_psql("SELECT id FROM servers WHERE name='test-server'");
     
     if ($out && $out =~ /^\d+$/) {
         $serverid = $out;
     } else {
         # Create test server
-        $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -t -c "INSERT INTO servers (name, comment) VALUES ('test-server', 'Test server') RETURNING id" 2>&1};
-        $out = `$cmd`;
+        $out = run_psql("INSERT INTO servers (name, comment) VALUES ('test-server', 'Test server') RETURNING id");
         chomp($out);
         $out =~ s/\s+//g;
         $serverid = $out;
@@ -103,18 +124,14 @@ subtest 'Setup: Create test zone' => sub {
     }
     
     # Check if zone exists
-    $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -t -c "SELECT id FROM zones WHERE name='test-rpz.example.cz' AND server=$serverid" 2>&1};
-    $out = `$cmd`;
-    chomp($out);
-    $out =~ s/\s+//g;
+    $out = run_psql("SELECT id FROM zones WHERE name='test-rpz.example.cz' AND server=$serverid");
     
     if ($out && $out =~ /^\d+$/) {
         $zoneid = $out;
         plan skip_all => 'Zone already exists, skipping setup';
     } else {
         # Create test RPZ zone
-        $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -t -c "INSERT INTO zones (name, server, type, comment) VALUES ('test-rpz.example.cz', $serverid, 'master', 'Test RPZ zone') RETURNING id" 2>&1};
-        $out = `$cmd`;
+        $out = run_psql("INSERT INTO zones (name, server, type, comment) VALUES ('test-rpz.example.cz', $serverid, 'master', 'Test RPZ zone') RETURNING id");
         chomp($out);
         $out =~ s/\s+//g;
         $zoneid = $out;
@@ -144,10 +161,7 @@ subtest 'Import initial blocklist' => sub {
     like($out, qr/ADD:\s+3/, "Added 3 entries");
     
     # Verify in database
-    my $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -t -c "SELECT COUNT(*) FROM hosts WHERE zone=$zoneid AND type=4 AND comment LIKE 'blocklist:test-source:%'" 2>&1};
-    my $count = `$cmd`;
-    chomp($count);
-    $count =~ s/\s+//g;
+    my $count = run_psql("SELECT COUNT(*) FROM hosts WHERE zone=$zoneid AND type=4 AND comment LIKE 'blocklist:test-source:%'");
     is($count, 3, "Database has 3 entries");
 };
 
@@ -194,10 +208,7 @@ subtest 'Add new entry' => sub {
     like($out, qr/ADD:\s+1/, "Added 1 new entry");
     
     # Verify count
-    my $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -t -c "SELECT COUNT(*) FROM hosts WHERE zone=$zoneid AND type=4 AND comment LIKE 'blocklist:test-source:%'" 2>&1};
-    my $count = `$cmd`;
-    chomp($count);
-    $count =~ s/\s+//g;
+    my $count = run_psql("SELECT COUNT(*) FROM hosts WHERE zone=$zoneid AND type=4 AND comment LIKE 'blocklist:test-source:%'");
     is($count, 4, "Database has 4 entries");
 };
 
@@ -222,10 +233,7 @@ subtest 'Remove entry (mark as removed)' => sub {
     like($out, qr/DELETE:\s+1/, "Deleted 1 entry");
     
     # Verify count
-    my $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -t -c "SELECT COUNT(*) FROM hosts WHERE zone=$zoneid AND type=4 AND comment LIKE 'blocklist:test-source:%'" 2>&1};
-    my $count = `$cmd`;
-    chomp($count);
-    $count =~ s/\s+//g;
+    my $count = run_psql("SELECT COUNT(*) FROM hosts WHERE zone=$zoneid AND type=4 AND comment LIKE 'blocklist:test-source:%'");
     is($count, 3, "Database has 3 entries after deletion");
 };
 
@@ -248,10 +256,7 @@ subtest 'Dry-run mode' => sub {
     like($out, qr/\[DRY-RUN\]/, "Dry-run mode indicated");
     
     # Verify count unchanged
-    my $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -t -c "SELECT COUNT(*) FROM hosts WHERE zone=$zoneid AND type=4 AND comment LIKE 'blocklist:test-source:%'" 2>&1};
-    my $count = `$cmd`;
-    chomp($count);
-    $count =~ s/\s+//g;
+    my $count = run_psql("SELECT COUNT(*) FROM hosts WHERE zone=$zoneid AND type=4 AND comment LIKE 'blocklist:test-source:%'");
     is($count, 3, "Database still has 3 entries (dry-run made no changes)");
 };
 
@@ -300,12 +305,10 @@ subtest 'Duplicate domains in CSV' => sub {
 END {
     if ($zoneid && $serverid) {
         # Clean up test data
-        my $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -c "DELETE FROM hosts WHERE zone=$zoneid AND comment LIKE 'blocklist:%'" 2>&1};
-        system($cmd);
+        run_psql("DELETE FROM hosts WHERE zone=$zoneid AND comment LIKE 'blocklist:%'");
         
         # Optionally delete the zone too
-        # $cmd = qq{sudo -u postgres -- psql sauron -P pager=off -c "DELETE FROM zones WHERE id=$zoneid" 2>&1};
-        # system($cmd);
+        # run_psql("DELETE FROM zones WHERE id=$zoneid");
     }
 }
 
