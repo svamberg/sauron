@@ -181,7 +181,8 @@ jobs:
           . /etc/profile.d/sauron.sh
           test -s named.root || (rm -fv named.root && wget 'ftp://ftp.rs.internic.net/domain/named.root')
           /usr/local/sauron/import-roots default ./named.root
-          test -s ieee-oui.txt || (rm -fv ieee-oui.txt && wget -O ./ieee-oui.txt 'https://standards-oui.ieee.org/oui/oui.txt')
+          # Use bundled OUI sample file instead of downloading from IEEE (to avoid rate limiting)
+          cp "${{ github.workspace }}/test/oui.txt" ./ieee-oui.txt
           /usr/local/sauron/import-ethers ./ieee-oui.txt
         shell: bash
 
