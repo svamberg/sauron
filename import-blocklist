@@ -1,0 +1,882 @@
+#!/usr/bin/perl -I/opt/sauron
+#
+# import-blocklist - import blocked domains from CSV files into RPZ zones
+#
+# Copyright (c) 2026 CESNET, z.s.p.o.
+# Based on Sauron DNS management system
+#
+# This script imports blocked domains from external CSV sources
+# (e.g., government blocklists) into Sauron-managed RPZ zones.
+#
+# Features:
+#   - Configurable CSV column mapping
+#   - Automatic filtering by date_removed (expired entries are removed)
+#   - Support for multiple sources in single CSV or separate files
+#   - Incremental updates (add/modify/delete)
+#   - Dry-run mode for testing
+#
+# Usage:
+#   ./import-blocklist --config <file> --source <name> [--zone <zone>] [--dry-run]
+#   ./import-blocklist --config <file> --all [--dry-run]
+#
+
+require 5;
+use strict;
+use warnings;
+use utf8;
+
+use Getopt::Long;
+use Pod::Usage;
+use FindBin;
+use lib "$FindBin::Bin";
+
+use Sauron::DB;
+use Sauron::Util;
+use Sauron::BackEnd;
+use Sauron::SetupIO;
+use Sauron::Sauron;
+
+# Binmode for UTF-8
+binmode(STDOUT, ':utf8');
+binmode(STDERR, ':utf8');
+
+######################
+# Default values
+######################
+my $opt_config;
+my $opt_source;
+my $opt_zone;
+my $opt_all = 0;
+my $opt_dry_run = 0;
+my $opt_verbose = 0;
+my $opt_help = 0;
+my $opt_remove_expired = 1;
+my $opt_max_changes_percent = 25;  # Default: max 25% changes allowed
+my $opt_max_delete = 1000;          # Default: max 1000 deletes allowed
+my $opt_confirm_above = 0;          # Default: no confirmation required
+
+######################
+# Parse command line
+######################
+GetOptions(
+    'config=s'             => \$opt_config,
+    'source=s'             => \$opt_source,
+    'zone=s'               => \$opt_zone,
+    'all!'                 => \$opt_all,
+    'dry-run!'             => \$opt_dry_run,
+    'verbose|v+'           => \$opt_verbose,
+    'keep-expired!'        => \$opt_remove_expired,  # inverted logic
+    'max-changes-percent=i'=> \$opt_max_changes_percent,
+    'max-delete=i'         => \$opt_max_delete,
+    'confirm-above=i'      => \$opt_confirm_above,
+    'help|h'               => \$opt_help,
+) or pod2usage(2);
+
+$opt_remove_expired = !$opt_remove_expired;  # fix inverted logic
+
+pod2usage(1) if $opt_help;
+pod2usage(2) unless $opt_config;
+pod2usage(2) unless ($opt_source || $opt_all);
+pod2usage(2) if ($opt_source && $opt_all);
+
+# Special value -1 or 0 means no limit
+$opt_max_changes_percent = undef if ($opt_max_changes_percent <= 0);
+$opt_max_delete = undef if ($opt_max_delete <= 0);
+$opt_confirm_above = undef if ($opt_confirm_above <= 0);
+
+######################
+# Load configuration
+######################
+my $config = load_config_file($opt_config);
+die "Invalid configuration file: $opt_config\n" unless $config && ref($config) eq 'HASH';
+
+$opt_remove_expired = $config->{global_settings}{remove_expired}
+    if (defined $config->{global_settings}{remove_expired} && !$ENV{BLOCKLIST_KEEP_EXPIRED});
+
+######################
+# Load Sauron configuration
+######################
+set_encoding();
+load_config();
+
+######################
+# Connect to database
+######################
+db_connect() or die "Cannot connect to database: $DBI::errstr\n";
+
+######################
+# Main processing
+######################
+my @sources_to_process;
+
+if ($opt_all) {
+    @sources_to_process = @{$config->{sources}};
+} else {
+    @sources_to_process = grep { $_->{name} eq $opt_source } @{$config->{sources}};
+    die "Unknown source: $opt_source\n" unless @sources_to_process;
+}
+
+print "Processing " . scalar(@sources_to_process) . " source(s)\n";
+
+foreach my $src (@sources_to_process) {
+    process_source($src);
+}
+
+print "Done.\n" unless $opt_dry_run;
+exit(0);
+
+######################
+# Subroutines
+######################
+
+sub load_config_file {
+    my ($file) = @_;
+    
+    # Try JSON first (using JSON module if available, otherwise simple parser)
+    my $content = read_file_content($file);
+    return undef unless $content;
+    
+    # Simple JSON parser for our specific format
+    return parse_json_config($content);
+}
+
+sub read_file_content {
+    my ($file) = @_;
+    open(my $fh, '<:utf8', $file) or return undef;
+    local $/;
+    my $content = <$fh>;
+    close($fh);
+    return $content;
+}
+
+sub parse_json_config {
+    my ($content) = @_;
+    
+    # Use JSON module if available
+    eval {
+        require JSON;
+        JSON->import();
+        return decode_json($content);
+    };
+    
+    # Fallback to simple parser
+    return parse_simple_json($content);
+}
+
+sub parse_simple_json {
+    my ($json) = @_;
+    my %config = (sources => [], global_settings => {});
+    
+    # Extract sources array
+    if ($json =~ /"sources"\s*:\s*\[(.*?)\]\s*,\s*"global_settings"/s) {
+        my $sources_str = $1;
+        
+        # Parse each source object
+        while ($sources_str =~ /\{([^{}]+(?:\{[^{}]*\}[^{}]*)*)\}/gs) {
+            my $src_str = $1;
+            my %source;
+            
+            # Extract simple fields
+            $source{name} = $1 if $src_str =~ /"name"\s*:\s*"([^"]+)"/;
+            $source{description} = $1 if $src_str =~ /"description"\s*:\s*"([^"]+)"/;
+            $source{csv_file} = $1 if $src_str =~ /"csv_file"\s*:\s*"([^"]+)"/;
+            $source{zone} = $1 if $src_str =~ /"zone"\s*:\s*"([^"]+)"/;
+            $source{cname_target} = $1 if $src_str =~ /"cname_target"\s*:\s*"([^"]+)"/;
+            $source{txt_info_prefix} = $1 if $src_str =~ /"txt_info_prefix"\s*:\s*"([^"]+)"/;
+            
+            # Extract csv_columns
+            if ($src_str =~ /"csv_columns"\s*:\s*\{([^}]+)\}/s) {
+                my $cols_str = $1;
+                $source{csv_columns} = {};
+                $source{csv_columns}{domain} = $1 if $cols_str =~ /"domain"\s*:\s*"([^"]+)"/;
+                $source{csv_columns}{date_added} = $1 if $cols_str =~ /"date_added"\s*:\s*"([^"]+)"/;
+                $source{csv_columns}{date_removed} = $1 if $cols_str =~ /"date_removed"\s*:\s*"([^"]+)"/;
+                $source{csv_columns}{source} = $1 if $cols_str =~ /"source"\s*:\s*"([^"]+)"/;
+                $source{csv_columns}{dataset} = $1 if $cols_str =~ /"dataset"\s*:\s*"([^"]+)"/;
+            }
+            
+            # Extract filters
+            if ($src_str =~ /"filters"\s*:\s*\{([^}]+)\}/s) {
+                my $filt_str = $1;
+                $source{filters} = {};
+                $source{filters}{source_regex} = $1 if $filt_str =~ /"source_regex"\s*:\s*"([^"]+)"/;
+                $source{filters}{dataset_regex} = $1 if $filt_str =~ /"dataset_regex"\s*:\s*"([^"]+)"/;
+            }
+            
+            push @{$config{sources}}, \%source if $source{name};
+        }
+    }
+    
+    # Extract global_settings
+    if ($json =~ /"global_settings"\s*:\s*\{([^}]+)\}/s) {
+        my $gs_str = $1;
+        $config{global_settings}{default_cname_target} = $1 
+            if $gs_str =~ /"default_cname_target"\s*:\s*"([^"]+)"/;
+        $config{global_settings}{add_sha256sum} = ($1 eq 'true')
+            if $gs_str =~ /"add_sha256sum"\s*:\s*(true|false)/;
+        $config{global_settings}{remove_expired} = ($1 eq 'true')
+            if $gs_str =~ /"remove_expired"\s*:\s*(true|false)/;
+    }
+    
+    return \%config;
+}
+
+sub process_source {
+    my ($src) = @_;
+    
+    print "\n=== Processing source: $src->{name} ===\n";
+    print "    Description: $src->{description}\n";
+    print "    CSV file: $src->{csv_file}\n";
+    print "    Target zone: $src->{zone}\n";
+    
+    # Check if zone exists
+    my $serverid = get_server_for_zone($src->{zone});
+    unless ($serverid > 0) {
+        print STDERR "WARNING: Zone $src->{zone} not found, skipping source $src->{name}\n";
+        return;
+    }
+    
+    my $zoneid = get_zone_id($src->{zone}, $serverid);
+    unless ($zoneid > 0) {
+        print STDERR "WARNING: Cannot get zone ID for $src->{zone}, skipping\n";
+        return;
+    }
+    
+    # Read and parse CSV file
+    my @entries = parse_csv_file($src);
+    print "    Found " . scalar(@entries) . " entries in CSV\n";
+    
+    # Filter entries based on source filters
+    @entries = apply_filters(\@entries, $src);
+    print "    After filtering: " . scalar(@entries) . " entries\n";
+    
+    # Get existing entries from database for this source
+    my %existing = get_existing_entries($zoneid, $src->{name});
+    print "    Existing entries in DB: " . scalar(keys %existing) . "\n";
+    
+    # Calculate changes
+    my (%to_add, %to_modify, %to_delete);
+    
+    # Check what needs to be added or modified
+    foreach my $entry (@entries) {
+        my $domain = $entry->{domain};
+        next unless $domain;
+        
+        if (exists $existing{$domain}) {
+            # Check if modification needed
+            if (entry_changed($existing{$domain}, $entry, $src)) {
+                $to_modify{$domain} = $entry;
+            }
+            delete $existing{$domain};  # Mark as still needed
+        } else {
+            $to_add{$domain} = $entry;
+        }
+    }
+    
+    # Remaining existing entries should be deleted (expired/removed)
+    if ($opt_remove_expired) {
+        %to_delete = %existing;
+    }
+    
+    # Report changes
+    my $num_add = scalar(keys %to_add);
+    my $num_modify = scalar(keys %to_modify);
+    my $num_delete = scalar(keys %to_delete);
+    my $total_changes = $num_add + $num_modify + $num_delete;
+    my $existing_count = scalar(keys %existing);
+    
+    print "\n    Changes summary:\n";
+    print "      ADD:     $num_add\n";
+    print "      MODIFY:  $num_modify\n";
+    print "      DELETE:  $num_delete\n";
+    
+    # Check change limits before applying (skip for dry-run)
+    unless ($opt_dry_run) {
+        check_change_limits($num_add, $num_modify, $num_delete, $existing_count, $src->{name});
+    }
+    
+    # Apply changes
+    if ($opt_dry_run) {
+        print "\n[DRY-RUN] No changes will be applied\n";
+        print_changes(%to_add, %to_modify, %to_delete);
+        return;
+    }
+    
+    # Set flag to ignore transaction begin/commit (queries will auto-commit)
+    db_ignore_begin_and_commit(1);
+    
+    my ($added, $modified, $deleted) = (0, 0, 0);
+    
+    # Add new entries
+    foreach my $domain (keys %to_add) {
+        if (add_rpz_entry($zoneid, $to_add{$domain}, $src)) {
+            $added++;
+        } else {
+            print STDERR "    ERROR: Failed to add $domain\n";
+        }
+    }
+    
+    # Modify existing entries
+    foreach my $domain (keys %to_modify) {
+        if (update_rpz_entry($zoneid, $to_modify{$domain}, $src)) {
+            $modified++;
+        } else {
+            print STDERR "    ERROR: Failed to update $domain\n";
+        }
+    }
+    
+    # Delete expired entries
+    foreach my $domain (keys %to_delete) {
+        if (delete_rpz_entry($zoneid, $to_delete{$domain}, $src)) {
+            $deleted++;
+        } else {
+            print STDERR "    ERROR: Failed to delete $domain\n";
+        }
+    }
+    
+    # Reset flag (no explicit commit needed - queries auto-commit)
+    db_ignore_begin_and_commit(0);
+    
+    print "\n    Applied changes: +$added ~$modified -$deleted\n";
+}
+
+sub parse_csv_file {
+    my ($src) = @_;
+    
+    my $file = $src->{csv_file};
+    unless (-r $file) {
+        print STDERR "WARNING: Cannot read CSV file: $file\n";
+        return ();
+    }
+    
+    open(my $fh, '<:utf8', $file) or do {
+        print STDERR "WARNING: Cannot open CSV file: $file: $!\n";
+        return ();
+    };
+    
+    # Read header line
+    my $header_line = <$fh>;
+    chomp($header_line);
+    my @headers = split(/,/, $header_line);
+    
+    # Create column index mapping
+    my %col_idx;
+    my $cols = $src->{csv_columns};
+    for my $i (0..$#headers) {
+        $headers[$i] =~ s/^\s+|\s+$//g;  # Trim whitespace
+        foreach my $field (qw(domain date_added date_removed source dataset)) {
+            if ($headers[$i] eq $cols->{$field}) {
+                $col_idx{$field} = $i;
+            }
+        }
+    }
+    
+    # Read data lines
+    my %seen_domains;  # Track unique domains
+    my @entries;
+    while (my $line = <$fh>) {
+        chomp($line);
+        next if $line =~ /^\s*$/;  # Skip empty lines
+        
+        my @fields = parse_csv_line($line);
+        next unless @fields >= keys %col_idx;
+        
+        my %entry;
+        foreach my $field (qw(domain date_added date_removed source dataset)) {
+            if (defined $col_idx{$field}) {
+                my $val = $fields[$col_idx{$field}] // '';
+                $val =~ s/^\s+|\s+$//g;  # Trim
+                $entry{$field} = $val;
+            }
+        }
+        
+        # Clean up domain (remove http://, https://, www., trailing slashes)
+        if ($entry{domain}) {
+            $entry{domain} = clean_domain($entry{domain});
+        }
+        
+        # Skip duplicate domains (keep first occurrence)
+        next if $seen_domains{$entry{domain}};
+        $seen_domains{$entry{domain}} = 1;
+        
+        push @entries, \%entry;
+    }
+    
+    close($fh);
+    return @entries;
+}
+
+sub parse_csv_line {
+    my ($line) = @_;
+    my @fields;
+    my $field = '';
+    my $in_quotes = 0;
+    
+    for my $char (split(//, $line)) {
+        if ($char eq '"' && !$in_quotes) {
+            $in_quotes = 1;
+        } elsif ($char eq '"' && $in_quotes) {
+            $in_quotes = 0;
+        } elsif ($char eq ',' && !$in_quotes) {
+            push @fields, $field;
+            $field = '';
+        } else {
+            $field .= $char;
+        }
+    }
+    push @fields, $field;
+    
+    return @fields;
+}
+
+sub clean_domain {
+    my ($url) = @_;
+    
+    # Remove protocol
+    $url =~ s|^https?://||i;
+    $url =~ s|^www\.||i;
+    
+    # Remove path
+    $url =~ s|/.*$||;
+    
+    # Remove port
+    $url =~ s|:\d+$||;
+    
+    # Trim whitespace
+    $url =~ s/^\s+|\s+$//g;
+    
+    # Lowercase
+    $url = lc($url);
+    
+    return $url;
+}
+
+sub apply_filters {
+    my ($entries, $src) = @_;
+    
+    my @filtered;
+    my $filters = $src->{filters} || {};
+    
+    ENTRY: foreach my $entry (@$entries) {
+        # Skip entries with date_removed in the past
+        if ($entry->{date_removed}) {
+            my $removal_date = parse_date($entry->{date_removed});
+            if ($removal_date && $removal_date <= today_days()) {
+                next ENTRY;
+            }
+        }
+        
+        # Apply source regex filter
+        if ($filters->{source_regex} && $entry->{source}) {
+            next ENTRY unless $entry->{source} =~ /$filters->{source_regex}/i;
+        }
+        
+        # Apply dataset regex filter
+        if ($filters->{dataset_regex} && $entry->{dataset}) {
+            next ENTRY unless $entry->{dataset} =~ /$filters->{dataset_regex}/i;
+        }
+        
+        # Validate domain
+        next ENTRY unless $entry->{domain};
+        next ENTRY unless valid_domainname($entry->{domain});
+        
+        push @filtered, $entry;
+    }
+    
+    return @filtered;
+}
+
+sub get_existing_entries {
+    my ($zoneid, $source_name) = @_;
+    
+    my %entries;
+    my $comment_prefix = "blocklist:$source_name:";
+    
+    my $query = "SELECT h.id, h.domain, h.cname_txt, h.comment, h.info " .
+                "FROM hosts h WHERE h.zone = $zoneid AND h.type = 4 " .
+                "AND h.comment LIKE " . db_encode_str($comment_prefix . '%');
+    
+    my @rows;
+    db_query($query, \@rows);
+    
+    foreach my $row (@rows) {
+        my ($id, $domain, $cname, $comment, $info) = @$row;
+        $entries{$domain} = {
+            id => $id,
+            domain => $domain,
+            cname => $cname,
+            comment => $comment,
+            info => $info,
+        };
+    }
+    
+    return %entries;
+}
+
+sub entry_changed {
+    my ($existing, $new, $src) = @_;
+    
+    # Get expected CNAME target from source config
+    my $expected_cname = $src->{cname_target} || $src->{default_cname_target};
+    
+    # Check if CNAME target changed (handle undefined values)
+    if (!defined $existing->{cname} || $existing->{cname} ne $expected_cname) {
+        return 1;
+    }
+    
+    # Check if info/metadata is missing
+    if (!defined $existing->{info} || $existing->{info} eq '') {
+        return 1;
+    }
+    
+    return 0;  # No significant changes
+}
+
+sub add_rpz_entry {
+    my ($zoneid, $entry, $src) = @_;
+    
+    my $domain = $entry->{domain};
+    my $cname = $src->{cname_target} || $src->{default_cname_target};
+    my $comment = "blocklist:$src->{name}:$entry->{source}";
+    my $info = format_info_text($entry, $src);
+    
+    # Check if domain already exists in the zone (regardless of source)
+    my $existing_id = get_host_id($zoneid, $domain);
+    if ($existing_id > 0) {
+        # Domain exists - update it with new info if from our source
+        print "    UPDATE: $domain (already exists in zone)\n" if $opt_verbose;
+        
+        my $query = "UPDATE hosts SET " .
+                    "cname_txt = " . db_encode_str($cname) . ", " .
+                    "comment = " . db_encode_str($comment) . ", " .
+                    "info = " . db_encode_str($info) . " " .
+                    "WHERE id = $existing_id AND type = 4";
+        
+        return db_exec($query) >= 0;
+    }
+    
+    print "    ADD: $domain --> $cname\n" if $opt_verbose;
+    
+    # Create host record with CNAME
+    my @cname_l = ([0, $cname, '']);
+    my @txt_l = ([0, $info, '']);
+    
+    my $hostid = add_host({
+        zone => $zoneid,
+        type => 4,  # alias (CNAME)
+        domain => $domain,
+        class => 'IN',
+        cname_txt => $cname,
+        comment => $comment,
+        info => $info,
+        txt_l => \@txt_l,
+    });
+    
+    return $hostid > 0;
+}
+
+sub update_rpz_entry {
+    my ($zoneid, $entry, $src) = @_;
+    
+    my $domain = $entry->{domain};
+    my $cname = $src->{cname_target};
+    my $comment = "blocklist:$src->{name}:$entry->{source}";
+    my $info = format_info_text($entry, $src);
+    
+    print "    UPDATE: $domain\n" if $opt_verbose;
+    
+    my $query = "UPDATE hosts SET " .
+                "cname_txt = " . db_encode_str($cname) . ", " .
+                "comment = " . db_encode_str($comment) . ", " .
+                "info = " . db_encode_str($info) . " " .
+                "WHERE zone = $zoneid AND domain = " . db_encode_str($domain) . " AND type = 4";
+    
+    return db_exec($query) >= 0;
+}
+
+sub delete_rpz_entry {
+    my ($zoneid, $entry, $src) = @_;
+    
+    my $domain = $entry->{domain};
+    
+    print "    DELETE: $domain (expired/removed from source)\n" if $opt_verbose;
+    
+    my $query = "DELETE FROM hosts WHERE " .
+                "zone = $zoneid AND " .
+                "domain = " . db_encode_str($domain) . " AND " .
+                "type = 4 AND " .
+                "comment LIKE " . db_encode_str("blocklist:$src->{name}:%");
+    
+    return db_exec($query) >= 0;
+}
+
+sub format_info_text {
+    my ($entry, $src) = @_;
+    
+    my $date_added = format_date_cz($entry->{date_added});
+    my $source = $entry->{source} || 'Unknown';
+    my $prefix = $src->{txt_info_prefix} || 'Blokovaná doména';
+    
+    my $info = "pub: $date_added zdroj: $source";
+    $info .= " [$prefix]" if $prefix;
+    
+    return $info;
+}
+
+sub format_date_cz {
+    my ($iso_date) = @_;
+    return '' unless $iso_date;
+    
+    # Convert YYYY-MM-DD to D.M.YYYY
+    if ($iso_date =~ /^(\d{4})-(\d{2})-(\d{2})$/) {
+        return "$3.$2.$1";
+    }
+    return $iso_date;
+}
+
+sub parse_date {
+    my ($date_str) = @_;
+    return undef unless $date_str;
+    
+    if ($date_str =~ /^(\d{4})-(\d{2})-(\d{2})$/) {
+        my ($year, $month, $day) = ($1, $2, $3);
+        # Convert to days since epoch (simplified)
+        use Time::Local;
+        return timegm(0, 0, 0, $day, $month - 1, $year) / 86400;
+    }
+    return undef;
+}
+
+sub today_days {
+    return int(time() / 86400);
+}
+
+sub get_server_for_zone {
+    my ($zonename) = @_;
+    
+    my @rows;
+    db_query("SELECT server FROM zones WHERE name = " . db_encode_str($zonename), \@rows);
+    return @rows ? $rows[0][0] : -1;
+}
+
+sub check_change_limits {
+    my ($num_add, $num_modify, $num_delete, $existing_count, $source_name) = @_;
+    
+    my $total_changes = $num_add + $num_modify + $num_delete;
+    my $abort = 0;
+    
+    print "\n";
+    
+    # Check delete limit
+    if (defined $opt_max_delete && $num_delete > $opt_max_delete) {
+        print "ERROR: Too many deletions detected!\n";
+        print "    DELETE count: $num_delete\n";
+        print "    Maximum allowed: $opt_max_delete\n";
+        $abort = 1;
+    }
+    
+    # Check percentage limit (only if we have existing records)
+    if (defined $opt_max_changes_percent && $existing_count > 0) {
+        my $change_percent = int(($total_changes * 100) / $existing_count);
+        if ($change_percent > $opt_max_changes_percent) {
+            print "ERROR: Changes exceed maximum allowed percentage!\n";
+            print "    Total changes: $total_changes ($change_percent% of existing records)\n";
+            print "    Existing records: $existing_count\n";
+            print "    Maximum allowed: $opt_max_changes_percent%\n";
+            $abort = 1;
+        }
+    }
+    
+    # Check confirmation threshold
+    if (defined $opt_confirm_above && $total_changes > $opt_confirm_above) {
+        print "WARNING: Large number of changes detected!\n";
+        print "    Total changes: $total_changes\n";
+        print "    Threshold: $opt_confirm_above\n";
+        
+        # Ask for confirmation in interactive mode
+        if (-t STDIN) {
+            print "\nDo you want to continue? [y/N]: ";
+            my $answer = <STDIN>;
+            chomp($answer);
+            if (lc($answer) ne 'y' && lc($answer) ne 'yes') {
+                print "Aborted by user.\n";
+                $abort = 1;
+            }
+        } else {
+            print "    (Run interactively to confirm)\n";
+            $abort = 1;
+        }
+    }
+    
+    if ($abort) {
+        print "\nAborting. Use --max-changes-percent=0 --max-delete=0 to override checks.\n";
+        exit(1);
+    }
+}
+
+sub print_changes {
+    my (%to_add, %to_modify, %to_delete) = @_;
+    
+    print "\nChanges that would be made:\n";
+    
+    if (%to_add) {
+        print "\nADD:\n";
+        foreach my $d (sort keys %to_add) {
+            print "  + $d\n";
+        }
+    }
+    
+    if (%to_modify) {
+        print "\nMODIFY:\n";
+        foreach my $d (sort keys %to_modify) {
+            print "  ~ $d\n";
+        }
+    }
+    
+    if (%to_delete) {
+        print "\nDELETE:\n";
+        foreach my $d (sort keys %to_delete) {
+            print "  - $d\n";
+        }
+    }
+}
+
+__END__
+
+=head1 NAME
+
+import-blocklist - Import blocked domains from CSV files into RPZ zones
+
+=head1 SYNOPSIS
+
+import-blocklist --config <file> --source <name> [options]
+import-blocklist --config <file> --all [options]
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<--config>
+
+Configuration file path (required)
+
+=item B<--source>
+
+Source name from configuration to process
+
+=item B<--all>
+
+Process all sources defined in configuration
+
+=item B<--zone>
+
+Override target zone from configuration
+
+=item B<--dry-run>
+
+Show what would be done without making changes
+
+=item B<--verbose>
+
+Show detailed progress information
+
+=item B<--keep-expired>
+
+Do not remove entries marked as expired in CSV
+
+=item B<--max-changes-percent=E<lt>nE<gt>>
+
+Maximum percentage of changes allowed relative to existing records (default: 25).
+Set to 0 to disable this check. Useful for detecting corrupted source data.
+
+=item B<--max-delete=E<lt>nE<gt>>
+
+Maximum number of DELETE operations allowed (default: 1000).
+Set to 0 to disable this check. Protects against accidental mass deletions.
+
+=item B<--confirm-above=E<lt>nE<gt>>
+
+Require interactive confirmation if total changes exceed this number.
+Only works in interactive mode (TTY). Set to 0 to disable.
+
+=item B<--help>
+
+Show this help message
+
+=back
+
+=head1 DESCRIPTION
+
+This script imports blocked domain entries from external CSV sources
+(e.g., government blocklists) into Sauron-managed RPZ (Response Policy Zone)
+zones. It supports:
+
+=over 4
+
+=item * Configurable CSV column mapping
+
+=item * Automatic filtering by removal date
+
+=item * Multiple sources from single or multiple CSV files
+
+=item * Incremental updates (add/modify/delete)
+
+=item * Dry-run mode for testing changes
+
+=back
+
+=head1 CONFIGURATION FILE
+
+The configuration file is in JSON format and defines:
+
+=over 4
+
+=item * Source definitions with CSV file paths and column mappings
+
+=item * Filters for selecting relevant entries
+
+=item * Target zone and CNAME targets for each source
+
+=item * Global settings
+
+=back
+
+Example configuration:
+
+{
+  "sources": [
+    {
+      "name": "mfcr-hazardy",
+      "csv_file": "/path/to/blocking_lists.csv",
+      "csv_columns": {
+        "domain": "URL",
+        "date_added": "DATUM_ZAPISU",
+        "date_removed": "DATUM_VYMAZU",
+        "source": "ZDROJ",
+        "dataset": "NAZEV_DATOVE_SADY"
+      },
+      "filters": {
+        "source_regex": "Ministerstvo financí"
+      },
+      "zone": "rpz.cesnet.cz",
+      "cname_target": "*.poker.cesnet.cz."
+    }
+  ]
+}
+
+=head1 EXAMPLES
+
+# Process single source
+./import-blocklist --config blocklist.conf --source mfcr-hazardy
+
+# Process all sources with dry-run
+./import-blocklist --config blocklist.conf --all --dry-run
+
+# Verbose output
+./import-blocklist --config blocklist.conf --source sukl-leciva -v
+
+=head1 SEE ALSO
+
+L<import-zone>, L<sauron>
+
+=cut
