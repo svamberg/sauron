@@ -1,9 +1,162 @@
 0.9.0 (beta)
+
+	- Add import-blocklist script for RPZ blocklist management [svamberg]
+	  - New Perl script for importing blocked domains from CSV files
+	  - Supports multiple sources with configurable column mapping
+	  - Incremental updates: add/modify/delete operations
+	  - Safety features to prevent accidental data loss:
+	    * --max-changes-percent: limit changes as percentage (default 25%)
+	    * --max-delete: maximum DELETE operations (default 1000)
+	    * --confirm-above: interactive confirmation for large changes
+	  - Automatic deduplication of domains in source CSV
+	  - Sample configuration for Czech government blocklists:
+	    * Ministerstvo financí (unauthorized gambling)
+	    * SÚKL (illegal medicines)
+	    * SZPI (dangerous foods)
+	    * ÚSKVBL (veterinary medicines)
+	  - Documentation: docs/import-blocklist.txt
+	  - Integration tests: t/15-import-blocklist.t
+	  - CI workflow updated to run tests on push/PR
+
+	- Fixed UTF-8 corruption in CGI edit/save flow (notably zone comments)
+	  where text could degrade to mojibake on repeated updates [svamberg]
+	  - DBI backend now enables pg_enable_utf8 and forces UTF8 client encoding
+	  - CGI request UTF-8 parameter decoding is enabled only when configured
+	    charset is UTF-8 (backward-compatible with legacy non-UTF setups)
+	  - Added compatibility repair path in form handling for common mojibake
+	    patterns in UTF-8 mode
+	  - Added dbcheck encoding detector:
+	    --check=encoding [--mojibake-chars=<chars>] [--mojibake-charset=<enc>]
+	    to scan text columns for likely mojibake patterns generated from
+	    selected diacritics
+	  - dbcheck encoding check now also supports interactive repair when
+	    used with --commit (still non-destructive without --commit)
+	  - Added upgrade notes for one-time repair of already corrupted records
+	    (README.upgrade)
+	- Added KEA DHCP configuration import support: parses KEA JSON 
+	  configs (DHCPv4/DHCPv6) and converts subnets, pools, reservations, 
+	  shared-networks and options to ISC-like internal format used 
+	  by import-dhcp [svamberg]
+	- Generalized required-data validation for host record types [svamberg]
+	  - Added a centralized backend validator for type-specific required
+	    fields and entry lists
+	  - Applied validation consistently in add/update backend paths and
+	    CGI add/edit/restricted-add flows
+	  - Prevents semantically empty records from being saved
+	    (e.g. TXT without TXT entries, SRV without SRV entries)
+	  - Added dbcheck hosts consistency check for records missing required
+	    type-specific values (reports issues, no automatic fix)
+	- Approvals (new feature) [svamberg]
+	  - Mandatory justification requirement for approval requests
+	    - Two-step submission workflow: users must provide justification
+	      before approval request is created in the database
+	    - Prevents accidental submissions without proper documentation
+	    - Improves audit trail and reviewer context
+	  - Added a full web-based DNS approval workflow
+	    - New modules: Sauron::Approval and Sauron::CGI::Approvals
+	    - New CGI handlers and menu integration for approval requests,
+		  decision pages, and request detail views
+	    - Added helper script send-approval-reminders for pending approvals
+	  - Added database schema and migration support for approvals 
+	    - New schema file: sql/approval_workflow.sql
+	    - Updated init/tables.sql and dbconvert_1.7to1.8 to create and migrate
+	      approval-related tables
+	    - Updated config.in for approval workflow configuration options
+	  - Improved approval policy enforcement and security behavior 
+	    - Enforced approval checks in restricted host operations
+	    - Added superuser-specific approval advancement behavior
+	    - Removed token-based workflow path and tightened access control
+	  - Improved approval UI feedback and request usability
+	    - Better pending request display with level links and richer details
+	    - Added post-action navigation links and helpful submission feedback
+	    - Displayed approval level names in overviews and request details
+	  - Added approval-focused test coverage
+	    - New tests: t/05-approval-policy.t and t/06-approval-level-advance.t
+	- Added full CAA record support [svamberg]
+	  - New SQL table: caa_entries and upgrade
+	  - Apex CAA records are managed directly in zone edit form
+	  - Host CAA records are managed in host forms, including CAA-only records
+	  - import-zone/import-zone-comments and sauron generator handle CAA natively
+	  - Round-trip tests now verify CAA import and export
+	- DEPRECATED: Sauron::DB-Pg.pm module (legacy Pg.pm backend) is now 
+	  deprecated. Users are strongly encouraged to migrate to the default
+	  DB-DBI.pm module (DBI/DBD::Pg backend) which provides:
+	  - Better performance and reliability
+	  - Wider database compatibility
+	  - Better error handling and logging
+	  - More active maintenance and PostgreSQL version support
+	  Migration: Use 'ln -sf DB-DBI.pm Sauron/DB.pm' to switch backends,
+	  or reconfigure with './configure --with-DBI' and rebuild.
+	  The Pg.pm backend will be removed in a future version. Users will see
+	  deprecation warnings in system logs when using DB-Pg.pm.
+	- Added Catalog Zones (RFC 9432) [svamberg]
+	  - Full BIND 9.11+ support for DNS zone catalogs
+	  - New zone type 'C' (Catalog) for aggregating multiple zone metadata
+	  - Automatic zone distribution via AXFR transfers to secondary servers
+	  - Web interface for managing catalog membership
+	- Added Catalog Zone Groups support (RFC 9432 §5.2) [svamberg]
+	  - Member zones can be assigned to multiple named groups per catalog
+	  - Group definitions managed per catalog zone with optional comments
+	  - Web UI for group management with usage tracking and delete warnings
+	  - BIND zone file generator outputs group TXT records per member
+	  - New tables: zone_catalog_groups, catalog_group_defs
+	  - New "Catalog Groups" menu item and inline link from catalog zone view
+	- Added Aggregate Catalog Zones (type A) for multi-source catalog
+	  merging (RFC 9432) [svamberg]
+	  - New zone type 'A' merges members from multiple source catalog
+	    zones (type C) into a single output catalog zone
+	  - Priority-based conflict resolution when the same member zone
+	    appears in multiple source catalogs (lower priority wins)
+	  - New table: catalog_compositions (source/priority mapping)
+	  - CGI composition editor (ftype 16) for selecting sources and
+	    setting priorities
+	  - Generator produces merged zone file with conflict reporting
+	- Added 'catalog_only' flag for zones [svamberg]
+	  - Zones marked catalog_only are skipped entirely during generation
+	    (no named.conf entry, no zone file)
+	  - Intended for shadow catalog zones imported from external sources
+	- Added import-catalog-zone script [svamberg]
+	  - Imports external catalog zones via AXFR or zone file
+	  - Parses RFC 9432 PTR (member zones) and TXT (group assignments)
+	  - Creates shadow catalog zone (type C, catalog_only) in Sauron
+	  - --sync mode for incremental updates (add new, remove stale members)
+	  - --dryrun mode for safe preview without database changes
+	  - --group option auto-creates catalog group definition (zone-scoped)
+	  - --ignore-groups option skips RFC 9432 group TXT records
+	  - Automatic group definition creation from imported catalog data
+	- Added new option --keep-pending for sauron command [svamberg]
+	- Add check-reverse utility script for DNS PTR record validation [svamberg]
+	  - Verifies that A/AAAA records have corresponding PTR records in DNS
+	  - Intelligent reverse zone suggestions via WHOIS lookup and CIDR analysis
+	  - Support for RFC 2317 classless reverse zones (/25-/32 subnets)
+	  - Three-tier fallback strategy: authoritative SOA -> WHOIS block size -> 
+	    standard boundaries 
+	- Added TAP-based test suite using Test::More (t/ directory):
+	    - t/00-compile.t: compilation check for all .pm modules and scripts
+	    - t/01-util.t: unit tests for Sauron::Util (IP, CIDR, base64, etc.)
+	    - t/02-utilzone.t: unit tests for zone file parsing (forward/reverse)
+	    - t/03-utildhcp.t: unit tests for DHCP config parsing
+	    - t/04-sauron-module.t: Sauron::Sauron module loading tests
+	    - t/10-db-integration.t: database connectivity tests (requires SAURON_TEST_DSN)
+	    - t/11-import-generate.t: end-to-end import-zone/generatehosts/sauron tests
+	    - t/12-zone-roundtrip.t: zone import → generate → compare round-trip test
+	    - t/13-catalog-aggregate.t: import catalog zones, aggregate, compare tests
+	  - Added zone canonicalization tool (t/zone-canonicalize.pl) for
+	    diff-based comparison of zone files (normalizes FQDN, case, SOA serial)
+	  - Added comprehensive test zone (test/roundtrip.example.com.zone) with
+	    A, AAAA, CNAME, MX, NS, TXT, HINFO, WKS, SRV, SSHFP, TLSA, NAPTR,
+	    DS, delegations, and glue records
+	  - Added GitHub Actions CI pipeline (.github/workflows/ci.yml) running
+	    unit tests in Debian container with PostgreSQL integration tests
+	  - Added 'make test' target in Makefile.in
 	- Added Sauron::SetupIO module for correct encoding settings,
 	  sets encoding transport layers according to system settings
 	  (locale for STDIN, STDOUT, STDERR) using Encode::Locale [svamberg]
-	- Increased maximum login length to 321 characters to allow storage 
-	  of eduPersonUniqueId according to RFC4512. [svamberg]
+	- Removed fixed username length limits for account creation, account
+	  modification, and web login/history filters while keeping existing
+	  allowed-character validation rules. [svamberg]
+	- Changed audit user fields cuser and muser from CHAR(321) to TEXT in
+	  schema templates and conversion scripts. [svamberg]
 	- Removed 'WITH OIDS' from SQL table creation; not supported since 
 	  version 12. [svamberg]
 	- change libcrypt-cb5-perl to libcryptx-perl [svamberg]
@@ -15,7 +168,8 @@
 	- add sshfp support [valtri, svamberg]
 	- Generic support for enum types in record list [svamberg, valtri]
 	- add import SSHFP records [svamberg, valtri]
-	- add import NAPTR records into Cusom zone file entries [svamberg]
+	- add import NAPTR records [svamberg]
+	- add new NAPTR form [svamberg]
 	- add script 'addzone' for creating new zone [svamberg]
 	- add TLSA support [svamberg]
 	- add script compare-zones.pl to comparing two zone files [svamberg]
@@ -34,6 +188,31 @@
 	- Add $SAURON_TOPMENU_BGCOLOR and $SAURON_TOPMENU_FONTCOLOR
 	  for customizing top menu. [svamberg]
 	- Unified appearance of the top menu (ON/OFF frames) [svamberg]
+	- Frontend redesign: semantic HTML, CSS design system, progressive
+	  JS enhancement [sysrow]
+	  - Replaced legacy HTML 3.2 table-based layout with semantic markup
+	    using CSS grid (s-shell, s-sidebar, s-main, s-topbar); top bar
+	    colour and per-environment label driven by CSS custom property
+	  - Added icons/sauron.css: CSS custom property foundation, full
+	    component library, WCAG 2.1 AA focus indicators
+	  - Added icons/sauron.js (no framework, no build step): sortable
+	    tables, inline row filter, keyboard navigation, login auto-focus,
+	    AJAX form handling
+	  - Added semantic class output to CGIutil display primitives
+	    (display_form, form_magic, display_list, display_dialog, alerts)
+	  - Added success1() helper alongside alert1/alert2/warning1 and
+	    converted ad-hoc h1/h2/h3 status messages across all CGI handler
+	    modules to the semantic helpers
+	  - Replaced inline bgcolor/FONT attributes with semantic classes
+	    across all CGI handler modules; applied s-list classes to plugin
+	    tables and removed dead code
+	  - Removed frame_mode, DTD_HACK and FRAMEON/FRAMEOFF; registered
+	    new $SAURON_ENV_NAME config variable for per-environment
+	    labelling in the top bar
+	  - Wired icons/sauron.css and icons/sauron.js into LOGOFILES so
+	    `make install` copies them to $(bindir)/icons
+	  - Fall back to '.' when srcdir is unset in Makefile.in test
+	    targets, allowing `make test-unit` directly from a clone
 
 0.8.5
 

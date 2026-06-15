@@ -31,7 +31,8 @@ $printer_conf=0;
 
 %yes_no_enum = (D=>'',Y=>'yes',N=>'no');
 %check_names_enum = (D=>'',W=>'warn',F=>'fail',I=>'ignore');
-%zone_type_enum = (M=>'master',S=>'slave',H=>'hint',F=>'forward');
+# Catalog zones (C) and aggregate catalog zones (A) are configured as type master in BIND (RFC 9432)
+%zone_type_enum = (M=>'master',S=>'slave',H=>'hint',F=>'forward',C=>'master',A=>'master');
 %forward_enum = (D=>'', O=>'only', F=>'first');
 %algorithm_enum = (157=>'hmac-md5');
 
@@ -390,7 +391,14 @@ sub make_dns() {
       if (get_zone($zoneid,\%zone));
 
     $type=$zone_type_enum{$zone{type}};
-    fatal("uknown zone type '$zone{type}'!") unless ($type ne '');
+    fatal("unknown zone type '$zone{type}'!") unless ($type ne '');
+
+    # Skip catalog-only zones - they exist only as catalog members
+    if ($zone{'catalog_only'} eq 't') {
+      print "Skipping catalog-only zone: $zonename\n" if ($opt_verbose);
+      next;
+    }
+
     if ($loopcounter >= $normalzones) {
       $subtype=$type;
       # process zones from master server
@@ -489,7 +497,8 @@ sub make_dns() {
       print BINDFILE "};\n\n\n";
     }
 
-    next unless ($type eq 'master');
+    # Catalog zones are treated as master zones for file generation (RFC 9432)
+    next unless ($type eq 'master' || $zone{type} eq 'C' || $zone{type} eq 'A');
 
     if ($zone{'dummy'} eq 't') {
       print "Skipping zone creation for dummy zone: $zonename\n";
@@ -523,10 +532,10 @@ sub make_dns() {
         $ttl='';
     }
 
-    $ttl_refresh = ($zone{refresh} ? $zone{refresh} : $server{refresh});
-    $ttl_retry = ($zone{retry} ? $zone{retry} : $server{retry});
-    $ttl_expire = ($zone{expire} ? $zone{expire} : $server{expire});
-    $ttl_minimum = ($zone{minimum} ? $zone{minimum} : $server{minimum});
+    $ttl_refresh = (defined($zone{refresh}) && $zone{refresh} ne '' ? $zone{refresh} : $server{refresh});
+    $ttl_retry = (defined($zone{retry}) && $zone{retry} ne '' ? $zone{retry} : $server{retry});
+    $ttl_expire = (defined($zone{expire}) && $zone{expire} ne '' ? $zone{expire} : $server{expire});
+    $ttl_minimum = (defined($zone{minimum}) && $zone{minimum} ne '' ? $zone{minimum} : $server{minimum});
 
     undef @q;
     db_query("SELECT MAX(h.mdate),MAX(h.cdate) " .
@@ -557,7 +566,7 @@ sub make_dns() {
       #print "server: $server{mdate}, zone: $zone{mdate} ",
       #     "hosts: $hosts_mdate  - $serial_date\n";
       $serial=new_serial($serial);
-      $serial_date=time;
+      $serial_date=time unless ($opt_keep_pending);
       unless ($opt_noupdateserial) {
         print "Updating serial $zone{serial} --> $serial\n";
         fatal("Cannot update zone $zonename serial!")
@@ -571,7 +580,7 @@ sub make_dns() {
     fatal("no hostmaster defined either in server nor zone record for: " .
           "$zonename") if ($hostmaster eq '');
     fatal("server hostname not defined!") if ($hostname eq '');
-    fatal("no TTL defined!") unless ($TTL > 0);
+    fatal("no TTL defined!") unless ($TTL > 0 || $zone{type} eq 'C' || $zone{type} eq 'A');
     if ($bind_conf) {
       print ZONEFILE '$TTL ' . "$TTL\t; default TTL for this zone\n;\n";
       print ZONEFILE '$ORIGIN ' . "$zonename.\n;\n";
@@ -593,11 +602,34 @@ sub make_dns() {
                 "$ttl_refresh\:$ttl_retry\:$ttl_expire\:$ttl_minimum\:\:\n";
     }
 
-    foreach $i (1..$#{$zone{ns}}) {
-      printf ZONEFILE $ZFORMAT, '',$ttl,$class,'NS',$zone{ns}[$i][1]
+    # For catalog zones (RFC 9432) or zones without NS records, add placeholder NS
+    my $has_ns = 0;
+    if (defined($zone{ns}) && ref($zone{ns}) eq 'ARRAY' && @{$zone{ns}} > 1) {
+      for my $i (1..$#{$zone{ns}}) {
+        if ($zone{ns}[$i] && $zone{ns}[$i][1]) {
+          $has_ns = 1;
+          last;
+        }
+      }
+    }
+
+    if ($zone{type} eq 'C' || $zone{type} eq 'A' || !$has_ns) {
+      # Catalog/aggregate zone or no NS records - add placeholder NS record
+      printf ZONEFILE $ZFORMAT, '',$ttl,$class,'NS','invalid.'
         if ($bind_conf);
-      printf TINYDNSFILE "&$zonename\:\:$zone{ns}[$i][1]\:$ttl\:\:\n"
+      printf TINYDNSFILE "&$zonename\:\:invalid.\:$ttl\:\:\n"
         if ($tiny_conf);
+    }
+
+    # Generate any actual NS records (skip the header at index 0)
+    if (defined($zone{ns}) && ref($zone{ns}) eq 'ARRAY') {
+      foreach $i (1..$#{$zone{ns}}) {
+        next unless $zone{ns}[$i][1];  # Skip empty entries
+        printf ZONEFILE $ZFORMAT, '',$ttl,$class,'NS',$zone{ns}[$i][1]
+          if ($bind_conf);
+        printf TINYDNSFILE "&$zonename\:\:$zone{ns}[$i][1]\:$ttl\:\:\n"
+          if ($tiny_conf);
+      }
     }
 
     if ($rev eq 'f') {
@@ -933,7 +965,7 @@ sub make_dns() {
               for $k (0 .. $#{$txt}) {
                   $val=$$txt[$k];
                   $val =~ s/\"//g;
-                  $padding = length(sprintf ZONEFILE $ZFORMAT, '',$ttl,$class,'TXT','');
+                  $padding = length(sprintf $ZFORMAT, '',$ttl,$class,'TXT','');
                   printf ZONEFILE $ZFORMAT, '',$ttl,$class,'TXT',
                       bind_fmt_long_data("$val", $padding)
                       if ($bind_conf);
@@ -1521,6 +1553,109 @@ sub make_dns() {
       }
     }
 
+    # NAPTR records
+    undef @q;
+    db_query("SELECT a.domain,a.ttl,a.expiration," .
+         " b.order_val,b.preference,b.flags,b.service,b.regexp,b.replacement " .
+         "FROM hosts a, naptr_entries b, zones z " .
+         "WHERE a.zone=z.id AND z.id=$zoneid " .
+         "AND (a.type=10 OR a.type=14) AND a.id=b.ref AND b.type=1 " .
+         "ORDER BY a.domain,b.order_val,b.preference;",\@q);
+    error(db_errormsg()) if (db_errormsg());
+    if (@q > 0) {
+      print ZONEFILE ";\n;\n; NAPTR records\n;\n" if ($bind_conf);
+      for $i (0 .. $#q) {
+      $domain=remove_origin($q[$i][0],$origin);
+      if ($domain =~ /\.$/) {
+      error("Out-of-zone NAPTR record skipped: $q[$i][0]");
+      next;
+      }
+      if ($domain =~ /\.($delegation_mask)$/) {
+      error("NAPTR in delegated zone skipped: $q[$i][0]");
+      next;
+      }
+      if (($q[$i][2] > 0) && ($q[$i][2] < $time_now_ticks)) {
+      error("Skipping expired NAPTR record: $q[$i][0]");
+      next;
+      }
+      $ttl=$q[$i][1];
+      $ttl='' unless ($ttl > 0);
+      $order=($q[$i][3] > 0 ? $q[$i][3] : 0);
+      $preference=($q[$i][4] > 0 ? $q[$i][4] : 0);
+      $flags=$q[$i][5];
+      $service=$q[$i][6];
+      $regex=$q[$i][7];
+      $replacement=$q[$i][8];
+
+      printf ZONEFILE $ZFORMAT, $domain,$ttl,$class,'NAPTR',
+        "$order $preference \"$flags\" \"$service\" \"$regex\" $replacement" if ($bind_conf);
+
+      # tinydns naptr format
+      my $tinydns_record = sprintf("\\%03o\\%03o", $order, $preference);
+      $tinydns_record .= sprintf("\\%03o", length($flags)) if $flags;
+      for (my $j = 0; $j < length($flags); $j++) {
+      $tinydns_record .= sprintf("\\%03o", ord(substr($flags, $j, 1)));
+      }
+      $tinydns_record .= sprintf("\\%03o", length($service)) if $service;
+      for (my $j = 0; $j < length($service); $j++) {
+      $tinydns_record .= sprintf("\\%03o", ord(substr($service, $j, 1)));
+      }
+      $tinydns_record .= sprintf("\\%03o", length($regex)) if $regex;
+      for (my $j = 0; $j < length($regex); $j++) {
+      $tinydns_record .= sprintf("\\%03o", ord(substr($regex, $j, 1)));
+      }
+      $replacement .= ".$zonename" unless ($replacement =~ /\.$/);
+      $tinydns_record .= sprintf("\\%03o", length($replacement)) if $replacement;
+      for (my $j = 0; $j < length($replacement); $j++) {
+      $tinydns_record .= sprintf("\\%03o", ord(substr($replacement, $j, 1)));
+      }
+      printf TINYDNSFILE ":%s:35:%s:\n", $domain, $tinydns_record if ($tiny_conf);
+      }
+    }
+
+    # CAA records
+    undef @q;
+    db_query("SELECT a.domain,a.ttl,a.expiration," .
+             " b.flags,b.tag,b.value " .
+             "FROM hosts a, caa_entries b, zones z " .
+             "WHERE a.zone=z.id AND z.id=$zoneid " .
+             "AND (a.type=1 OR a.type=3 OR a.type=8 OR a.type=10 OR " .
+             "     a.type=11 OR a.type=12 OR a.type=13 OR a.type=14 OR a.type=15) " .
+             "AND a.id=b.ref AND b.type=1 " .
+             "ORDER BY a.domain,b.flags,b.tag,b.value;",\@q);
+    error(db_errormsg()) if (db_errormsg());
+    if (@q > 0) {
+      print ZONEFILE ";\n;\n; CAA records\n;\n" if ($bind_conf);
+      for $i (0 .. $#q) {
+        $domain=remove_origin($q[$i][0],$origin);
+        if ($domain =~ /\.$/) {
+          error("Out-of-zone CAA record skipped: $q[$i][0]");
+          next;
+        }
+        if ($domain =~ /\.($delegation_mask)$/) {
+          error("CAA in delegated zone skipped: $q[$i][0]");
+          next;
+        }
+        if (($q[$i][2] > 0) && ($q[$i][2] < $time_now_ticks)) {
+          error("Skipping expired CAA record: $q[$i][0]");
+          next;
+        }
+        $ttl=$q[$i][1];
+        $ttl='' unless ($ttl > 0);
+        $flags=($q[$i][3] > 0 ? $q[$i][3] : 0);
+        $tag=$q[$i][4];
+        $val=$q[$i][5];
+        $val =~ s/^"(.*)"$/$1/;
+        $val =~ s/([\\"])/\\$1/g;
+
+        printf ZONEFILE $ZFORMAT, $domain,$ttl,$class,'CAA',
+               "$flags $tag \"$val\"" if ($bind_conf);
+
+        error("CAA records are not supported in tinydns output: $q[$i][0]")
+          if ($tiny_conf);
+      }
+    }
+
     # TXT records
     undef @q;
     db_query("SELECT a.domain,a.ttl,a.expiration,b.txt " .
@@ -1576,6 +1711,104 @@ sub make_dns() {
       for $i (1..$#{$zone{zentries}}) {
         print ZONEFILE $zone{zentries}[$i][1],"\n" if ($bind_conf);
         # Nothing we can do for tinydns here I guess ..
+      }
+    }
+
+    # Catalog zone metadata (RFC 9432)
+    if ($zone{type} eq 'C' && $bind_conf) {
+      my @catalog_members;
+      my $catalog_rec = {};
+
+      # Load catalog members
+      if (get_zone_catalog_members($zoneid, $catalog_rec) == 0 && $catalog_rec->{count} > 0) {
+        print ZONEFILE ";\n; Catalog zone members (RFC 9432)\n;\n";
+
+        # Version metadata record
+        print ZONEFILE "version.catalog\t$ttl\tIN\tTXT\t\"2\"\n";
+
+        # Member zone PTR records
+        for $i (0 .. $#{$catalog_rec->{members}}) {
+          my $member_zone = $catalog_rec->{members}[$i][1];
+          my $member_id = $catalog_rec->{members}[$i][0];
+          my $member_groups = $catalog_rec->{members}[$i][7];
+          $member_zone =~ s/\.$//;  # Remove trailing dot
+
+          printf ZONEFILE $ZFORMAT, "uuid-$member_id.zones",$ttl,'IN','PTR',"$member_zone."
+            if ($bind_conf);
+
+          # Group property TXT records (RFC 9432 §5.2)
+          if ($bind_conf && ref($member_groups) eq 'ARRAY') {
+            for my $grp (@{$member_groups}) {
+              printf ZONEFILE $ZFORMAT, "group.uuid-$member_id.zones",
+                  $ttl,'IN','TXT',"\"$grp\"";
+            }
+          }
+        }
+      } else {
+        print ZONEFILE ";\n; Catalog zone (no members currently)\n;\n" if ($bind_conf);
+        print ZONEFILE "version.catalog\t$ttl\tIN\tTXT\t\"2\"\n" if ($bind_conf);
+      }
+    }
+
+    # Aggregate catalog zone - merge members from source catalog zones (RFC 9432)
+    if ($zone{type} eq 'A' && $bind_conf) {
+      my (@comps, %seen_names, @conflicts);
+
+      # Load source catalog zones ordered by priority
+      db_query("SELECT cc.source_zone_id, z.name, cc.priority " .
+               "FROM catalog_compositions cc " .
+               "JOIN zones z ON cc.source_zone_id = z.id " .
+               "WHERE cc.composite_zone_id = $zoneid " .
+               "ORDER BY cc.priority ASC, z.name ASC", \@comps);
+
+      if (@comps > 0) {
+        print ZONEFILE ";\n; Aggregate catalog zone members (RFC 9432)\n;\n";
+        print ZONEFILE "version.catalog\t$ttl\tIN\tTXT\t\"2\"\n";
+
+        for my $comp (@comps) {
+          my ($src_id, $src_name, $prio) = @$comp;
+          my $src_rec = {};
+          get_zone_catalog_members($src_id, $src_rec);
+
+          print ZONEFILE ";\n; Source: $src_name (priority=$prio)\n;\n";
+
+          next unless ($src_rec->{count} > 0);
+          for $i (0 .. $#{$src_rec->{members}}) {
+            my $mzone_name = $src_rec->{members}[$i][1];
+            my $mzone_id   = $src_rec->{members}[$i][0];
+            my $mgroups    = $src_rec->{members}[$i][7];
+            $mzone_name =~ s/\.\.?$//;
+
+            my $lc_name = lc($mzone_name);
+            if ($seen_names{$lc_name}) {
+              push @conflicts,
+                "  '$mzone_name' from '$src_name' (prio=$prio) " .
+                "skipped; $seen_names{$lc_name} has higher precedence (lower priority)";
+              next;
+            }
+            $seen_names{$lc_name} = "$src_name (prio=$prio)";
+
+            printf ZONEFILE $ZFORMAT,
+                "uuid-$mzone_id.zones",
+                $ttl, 'IN', 'PTR', "$mzone_name.";
+
+            if (ref($mgroups) eq 'ARRAY') {
+              for my $grp (@{$mgroups}) {
+                printf ZONEFILE $ZFORMAT,
+                    "group.uuid-$mzone_id.zones",
+                    $ttl, 'IN', 'TXT', "\"$grp\"";
+              }
+            }
+          }
+        }
+
+        if (@conflicts) {
+          print "CONFLICTS in aggregate zone '$zonename':\n";
+          for my $c (@conflicts) { print "$c\n"; }
+        }
+      } else {
+        print ZONEFILE ";\n; Aggregate catalog zone (no source catalogs configured)\n;\n";
+        print ZONEFILE "version.catalog\t$ttl\tIN\tTXT\t\"2\"\n";
       }
     }
 
@@ -3287,7 +3520,7 @@ sub make_printcap() {
 $VER = sauron_version();
 
 $result=GetOptions("help|h","all|a","bind|b","dhcp|d","dhcp6","printer|p","mail",
-                   "updateserial","noupdateserial","verbose","clean",
+                   "updateserial","noupdateserial","keep-pending","verbose","clean",
                    "check","dhcpclass=s","tinydns|t", "ignorelocal|i");
 
 if ($opt_help || @ARGV < 1 || $result < 1) {
@@ -3300,7 +3533,8 @@ if ($opt_help || @ARGV < 1 || $result < 1) {
       "\t--dhcp6              generate DHCPv6 (dhcpd) configuration files\n",
       "\t--clean              cleanup expired records and vacuum database\n",
       "\t--printer            generate PRINTER (lpd) configuration files\n\n",
-      "\t--updateserial       force serial update on master zones\n\n",
+      "\t--updateserial       force serial update on master zones\n",
+      "\t--keep-pending       keep PENDING markers (do not update serial_date)\n\n",
       "\t--ignorelocal        force ignore RFC1918 subnets\n\n",
       "\t--check              check validity of generated dhcp.conf,named.conf,\n",
       "\t                     and zone files\n\n",
@@ -3318,6 +3552,7 @@ $opt_dhcp6=($opt_dhcp6 ? 1 : 0);
 $opt_bind=($opt_bind ? 1 : 0);
 $opt_tinydns=($opt_tinydns ? 1 : 0);
 $opt_printer=($opt_printer ? 1 : 0);
+$opt_keep_pending=($opt_keep_pending ? 1 : 0);
 $opt_updateserial=($opt_updateserial ? 1 : 0);
 $opt_noupdateserial=($opt_noupdateserial ? 1 : 0);
 $opt_check=($opt_check ? 1 : 0);
@@ -3341,7 +3576,7 @@ $host =~ s/\n//g;
 
 
 fatal("target directory is a file! ($targetdir)") if (-f $targetdir);
-fatal("target directory does not exists ($targetdir)") if (! -d $targetdir);
+fatal("target directory does not exist ($targetdir)") if (! -d $targetdir);
 fatal("no permissions to target directory!")
         unless (-r $targetdir && -x $targetdir && -w $targetdir);
 fatal("--check option used but SAURON_NAMED_CHK_PROG not configured!")
