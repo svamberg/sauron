@@ -523,11 +523,20 @@ sub make_dns() {
     $class=~s/\s+$//g;
     $TTL=$server{'ttl'};
 
-    if (defined($zone{'ttl'}) and $zone{'ttl'} >= 0) {
-        $TTL=$zone{'ttl'};
-        $ttl=$TTL;
+    # Zone TTL overrides server TTL only when it is a positive value.
+    # Treat 0/NULL as "not set" for compatibility with legacy data.
+    if (defined($zone{'ttl'}) and $zone{'ttl'} > 0) {
+      $TTL=$zone{'ttl'};
+      $ttl=$TTL;
     } else {
-        $ttl='';
+      $ttl='';
+    }
+
+    # Fallback for old rows where server TTL may be NULL/0.
+    if (!(defined($TTL) and $TTL > 0)) {
+      $TTL = $main::TTL_MAX_SEC if (defined($main::TTL_MAX_SEC) &&
+                    $main::TTL_MAX_SEC > 0);
+      $TTL = 86400 unless (defined($TTL) and $TTL > 0);
     }
 
     $ttl_refresh = ($zone{refresh} ? $zone{refresh} : $server{refresh});
@@ -578,7 +587,7 @@ sub make_dns() {
     fatal("no hostmaster defined either in server nor zone record for: " .
           "$zonename") if ($hostmaster eq '');
     fatal("server hostname not defined!") if ($hostname eq '');
-    fatal("no TTL defined!") unless ($TTL > 0);
+    fatal("no TTL defined for zone: $zonename") unless ($TTL > 0);
     if ($bind_conf) {
       print ZONEFILE '$TTL ' . "$TTL\t; default TTL for this zone\n;\n";
       print ZONEFILE '$ORIGIN ' . "$zonename.\n;\n";
