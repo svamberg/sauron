@@ -1227,7 +1227,7 @@ sub form_magic($$$) {
 	my(@aml_key_l,%aml_key_h,@aml_acl_l,%aml_acl_h);
 	get_acl_list($serverid,\%aml_acl_h,\@aml_acl_l,
 		     ($rec->{acl_mode} == 1 ? param($prefix."_id") : 0));
-	get_key_list($serverid,\%aml_key_h,\@aml_key_l,157);
+	get_key_list($serverid,\%aml_key_h,\@aml_key_l,-1);
 	print td($rec->{name}),"<TD><TABLE><TR>",
  	      th(["<FONT size=-2>Type</FONT>",
 		  "<FONT size=-2>Op</FONT>",
